@@ -1,33 +1,44 @@
-# BERK — Minimal MVP
+# BERK — Cozy 2D Pixel-Art Virtual World
 
-A minimal web application featuring a password login screen and an interactive single-character 2D space.
+A private virtual world belonging to **Sopremish** and **Grape**. Features a secure password-protected gateway and an interactive top-down 2D pixel-art living room with smooth movement, collision geometry, and contextual object interactions.
 
 ---
 
 ## Features
 
-- **Server-Side Password Authentication**:
-  - The expected password is read from the `BERK_PASSWORD` server-side environment variable.
-  - No secrets or expected passwords are exposed in client-side code.
-  - Server validation uses constant-time hash comparisons to mitigate timing side-channel attacks.
-  - Incorrect passwords return generic rejection without disclosing sensitive details.
-- **Protected Sessions**:
-  - Authenticated sessions use an `httpOnly`, `SameSite=Lax`, secure HTTP cookie signed via HMAC-SHA256 (`berk_session`).
-  - Next.js Edge `middleware.ts` guards `/world` and `/` so unauthenticated requests are redirected immediately without rendering the protected page.
-  - Dedicated logout action invalidates the session cookie and redirects to `/login`.
-- **Interactive Character Space**:
-  - Full-screen space with a single character square.
-  - Fluid movement using **WASD** or the **Arrow keys** normalized for diagonal velocities.
-  - Prevents browser page scrolling when movement keys are pressed.
-  - Viewport boundary clamping guarantees the character never moves off-screen.
-  - Dynamic window resize handler maintains boundary clamping whenever the window dimensions change.
+- **Cozy Top-Down 2D Pixel-Art Living Room**:
+  - Enclosed, detailed interior with warm parquet wood flooring, crown moulding, and skirting boards.
+  - Large ornate boho woven rug defining the central seating space.
+  - Plush 3-seater terracotta velvet sofa with throw pillows and realistic foot collision.
+  - Walnut coffee table with a steaming ceramic mug of spiced chai and an open notebook.
+  - Media console featuring a retro TV playing a peaceful animated landscape.
+  - Double-hung sunlit window casting soft ambient light beams across the room.
+  - Tall dark oak library bookshelf with multi-colored book spines and trailing ivy.
+  - Mid-century brass floor lamp emitting a warm ambient glow.
+  - Large potted Monstera Deliciosa and decorative succulent stand.
+  - Wall clock, framed coastal landscape painting, and a sleeping orange tabby cat.
 
----
+- **Fluid Player Movement & Collision System**:
+  - Top-down character sprite with directional facing (**Down**, **Up**, **Left**, **Right**) and 4-frame walking animations.
+  - Controllable via **WASD** and **Arrow Keys** with diagonal speed normalization.
+  - Pure sliding collision resolution against walls and furniture to prevent sticking along obstacle edges.
+  - Browser scroll prevention on active movement keys and safe focus/blur state cleanup.
+  - Mobile-ready on-screen virtual D-pad and Action button for touch devices.
 
-## Prerequisites
+- **Proximity Interaction System**:
+  - Approaching key objects displays an unobtrusive in-world floating indicator: `[E] <Object Name>`.
+  - Pressing `E` (or clicking/tapping the prompt) opens a cozy pixel-styled inspection dialog with detailed lore and descriptions.
+  - Dismissable via `Esc`, `E`, or clicking "Continue".
 
-- [Node.js](https://nodejs.org/) v18.17+ (tested on Node v20+ and v22+)
-- npm v9+
+- **Server-Side Security & Protected Sessions**:
+  - Server validation reads `BERK_PASSWORD` from environment variables using timing-safe SHA-256 hash comparisons.
+  - Issues an `httpOnly`, `SameSite=Lax`, secure cookie signed via HMAC-SHA256 (`berk_session`).
+  - Next.js Edge `middleware.ts` guards `/world` and `/` so unauthenticated requests are redirected immediately.
+  - Working logout action terminates the session and redirects to `/login`.
+
+- **Multiplayer Architecture Ready (Phase 2)**:
+  - Strict separation of concerns between world rendering, room definitions, player state, collision detection, and input handling.
+  - Local player state is represented as a structured `PlayerState` object, allowing Phase 2 (multiplayer for Sopremish and Grape) to seamlessly plug in remote player states without touching the room renderer or movement engine.
 
 ---
 
@@ -55,7 +66,7 @@ A minimal web application featuring a password login screen and an interactive s
    ```
    Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-4. **Production Build & Test Run Locally**:
+4. **Production Build & Verification**:
    ```bash
    npm run build
    npm run start
@@ -65,24 +76,11 @@ A minimal web application featuring a password login screen and an interactive s
 
 ## Running Tests
 
-The test suite is powered by **Vitest** and covers authentication validation, session token signing/tamper resistance, movement calculations, diagonal speed normalization, boundary clamping, and resize adjustments.
+Unit tests are powered by **Vitest** and verify password validation, session tokens, movement calculations, collision geometry, sliding resolution, and interaction trigger zones.
 
 ```bash
 npm test
 ```
-
----
-
-## Deploying to Vercel
-
-This project is built with Next.js (App Router) and requires zero extra configuration to deploy on Vercel:
-
-1. **Import the repository** into your [Vercel Dashboard](https://vercel.com/new).
-2. **Set Environment Variables** in the Vercel project settings:
-   - `BERK_PASSWORD`: Set to your production password.
-   - `BERK_SESSION_SECRET` *(optional)*: Random string for signing session cookies.
-3. **Deploy**:
-   - Vercel automatically detects Next.js, executes `npm run build`, and provisions serverless and edge handlers.
 
 ---
 
@@ -94,20 +92,27 @@ berk/
 ├── .gitignore            # Excludes .env, build output, and node_modules
 ├── app/
 │   ├── api/auth/
-│   │   ├── login/        # Server-side login endpoint & cookie setter
+│   │   ├── login/        # Server-side password validation & session issuance
 │   │   └── logout/       # Session revocation & cookie deletion
-│   ├── login/            # Minimal responsive login screen
-│   ├── world/            # Full-screen single character space
-│   ├── globals.css       # Clean stylesheet with responsive UI styling
-│   ├── layout.tsx        # Root HTML layout and viewport configuration
+│   ├── login/            # Password login screen
+│   ├── world/            # Cozy 2D living room canvas, game loop, HUD & modal
+│   ├── globals.css       # Pixel-art canvas styles, modal styling, mobile D-pad
+│   ├── layout.tsx        # HTML head, viewport metadata
 │   └── page.tsx          # Root redirect handler
 ├── lib/
 │   ├── auth.ts           # Web Crypto HMAC session signing & password validation
-│   └── movement.ts       # Pure movement calculation & boundary clamping
-├── middleware.ts         # Route protection guard for /world & /
+│   ├── movement.ts       # Movement helpers and key checking
+│   └── world/
+│       ├── types.ts      # Player, Room, Collision, and Interaction types
+│       ├── pixelSprites.ts # Procedural pixel-art sprite generator and cached atlas
+│       ├── roomData.ts   # Living room layout, tile grid, furniture & collisions
+│       ├── collision.ts  # AABB collision detection, sliding resolution, proximity
+│       └── renderer.ts   # Canvas renderer: floor, walls, Y-sorted depth, lighting
+├── middleware.ts         # Edge route protection guard for /world & /
 ├── tests/
-│   ├── auth.test.ts      # Unit tests for auth, cookies, and tamper detection
-│   └── movement.test.ts  # Unit tests for WASD movement, clamping, and resize
+│   ├── auth.test.ts      # Unit tests for auth and session token validation
+│   ├── movement.test.ts  # Unit tests for basic movement and clamping
+│   └── collision.test.ts # Unit tests for 2D room collision & sliding movement
 ├── package.json
 └── tsconfig.json
 ```

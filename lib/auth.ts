@@ -44,10 +44,11 @@ function base64UrlDecode(str: string): Uint8Array {
 }
 
 /**
- * Creates a signed session token containing an expiration timestamp.
+ * Creates a signed session token containing an expiration timestamp and optional userId.
  */
-export async function createSessionToken(): Promise<string> {
+export async function createSessionToken(userId?: string): Promise<string> {
   const payload = {
+    userId: userId || 'authorized_user',
     exp: Date.now() + SESSION_DURATION_SECONDS * 1000,
     iat: Date.now(),
   };
@@ -64,6 +65,21 @@ export async function createSessionToken(): Promise<string> {
   const signatureB64 = base64UrlEncode(new Uint8Array(signature));
 
   return `${payloadB64}.${signatureB64}`;
+}
+
+export async function getSessionPayload(token: string | undefined | null): Promise<{ userId?: string; exp?: number } | null> {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  try {
+    const valid = await verifySessionToken(token);
+    if (!valid) return null;
+    const payloadBytes = base64UrlDecode(parts[0]);
+    const decoder = new TextDecoder();
+    return JSON.parse(decoder.decode(payloadBytes));
+  } catch {
+    return null;
+  }
 }
 
 /**

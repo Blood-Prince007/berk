@@ -97,3 +97,17 @@ export function clampToBoundaries(
     y: clamp(pos.y, 0, maxY),
   };
 }
+
+/**
+ * Derives the facing direction from active movement keys.
+ */
+export function getFacingDirection(
+  keys: MovementKeysState,
+  currentFacing: 'up' | 'down' | 'left' | 'right'
+): 'up' | 'down' | 'left' | 'right' {
+  if (keys.down) return 'down';
+  if (keys.up) return 'up';
+  if (keys.left) return 'left';
+  if (keys.right) return 'right';
+  return currentFacing;
+}
