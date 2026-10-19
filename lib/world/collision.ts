@@ -1,4 +1,4 @@
-import { Position, Rect, RoomDefinition, InteractiveObject } from './types';
+import { Position, Rect, RoomDefinition, InteractiveObject, Doorway } from './types';
 
 export const PLAYER_COLLISION_OFFSET_X = 7;
 export const PLAYER_COLLISION_OFFSET_Y = 22;
@@ -107,6 +107,52 @@ export function findNearbyInteractiveObject(
     const b = obj.bounds;
     if (px >= b.x && px <= b.x + b.width && py >= b.y && py <= b.y + b.height) {
       return obj;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Checks if player is stepping inside a doorway trigger zone.
+ */
+export function findActiveDoorway(
+  playerPos: Position,
+  room: RoomDefinition
+): Doorway | null {
+  if (!room.doors || room.doors.length === 0) return null;
+  const playerBox = getPlayerCollisionBox(playerPos);
+
+  for (const door of room.doors) {
+    if (checkAABBCollision(playerBox, door.bounds)) {
+      return door;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Checks if player is close enough to a doorway to show an [E] Enter prompt.
+ */
+export function findNearbyDoorway(
+  playerPos: Position,
+  room: RoomDefinition
+): Doorway | null {
+  if (!room.doors || room.doors.length === 0) return null;
+  const px = playerPos.x + 16;
+  const py = playerPos.y + 24;
+
+  for (const door of room.doors) {
+    const b = door.bounds;
+    const margin = 14;
+    if (
+      px >= b.x - margin &&
+      px <= b.x + b.width + margin &&
+      py >= b.y - margin &&
+      py <= b.y + b.height + margin
+    ) {
+      return door;
     }
   }
 

@@ -1,4 +1,5 @@
 import { Direction } from './types';
+import { getHouseSpritesDictionary } from './houseSprites';
 
 export interface SpriteAtlas {
   floor_wood: HTMLCanvasElement;
@@ -19,6 +20,7 @@ export interface SpriteAtlas {
   sleeping_cat: HTMLCanvasElement;
   player: Record<Direction, HTMLCanvasElement[]>;
   player_grape: Record<Direction, HTMLCanvasElement[]>;
+  [key: string]: any;
 }
 
 // Global cached atlas
@@ -26,9 +28,20 @@ let cachedAtlas: SpriteAtlas | null = null;
 
 function createCanvas(width: number, height: number): HTMLCanvasElement {
   if (typeof document === 'undefined') {
-    return {} as HTMLCanvasElement;
+    return {
+      getContext: () => null,
+      width,
+      height,
+    } as unknown as HTMLCanvasElement;
   }
   const canvas = document.createElement('canvas');
+  if (!canvas || typeof canvas.getContext !== 'function') {
+    return {
+      getContext: () => null,
+      width,
+      height,
+    } as unknown as HTMLCanvasElement;
+  }
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d');
@@ -1029,6 +1042,7 @@ export function getSpriteAtlas(): SpriteAtlas {
     sleeping_cat: buildSleepingCat(),
     player: buildPlayerFrames(DEFAULT_SOPREMISH_PALETTE),
     player_grape: buildPlayerFrames(GRAPE_PALETTE),
+    ...getHouseSpritesDictionary(),
   };
 
   return cachedAtlas;

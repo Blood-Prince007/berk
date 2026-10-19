@@ -2,19 +2,30 @@
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import dynamic from 'next/dynamic';
-import { livingRoomDefinition } from '@/lib/world/roomData';
+import {
+  houseDefinition,
+  HOUSE_ZONES,
+  getRoomAtPosition,
+  DEFAULT_ROOM_ID,
+  HouseZone,
+} from '@/lib/world/roomData';
 
 const LiveKitVideoChat = dynamic(() => import('@/components/LiveKitVideoChat'), {
   ssr: false,
 });
 import { getSpriteAtlas, SpriteAtlas } from '@/lib/world/pixelSprites';
-import { renderLivingRoom } from '@/lib/world/renderer';
+import { renderHouseRoom } from '@/lib/world/renderer';
 import {
   resolveMovementWithSliding,
   findNearbyInteractiveObject,
 } from '@/lib/world/collision';
 import { getFacingDirection, isMovementKey, clamp } from '@/lib/movement';
-import { PlayerState, Direction, InteractiveObject, CameraState } from '@/lib/world/types';
+import {
+  PlayerState,
+  Direction,
+  InteractiveObject,
+  CameraState,
+} from '@/lib/world/types';
 import {
   client,
   account,
@@ -31,8 +42,8 @@ import {
 
 const PLAYER_SPEED_PIXELS_PER_SEC = 160;
 const WALK_ANIM_FPS = 8;
-const MIN_ZOOM = 0.7;
-const MAX_ZOOM = 3.5;
+const MIN_ZOOM = 0.35;
+const MAX_ZOOM = 2.5;
 const PUBLISH_INTERVAL_MS = 130; // ~7-8 updates per second while moving
 
 interface RemoteTargetState {
@@ -42,6 +53,7 @@ interface RemoteTargetState {
   animFrame: number;
   isMoving: boolean;
   seq: number;
+  roomId?: string;
 }
 
 export default function WorldPage() {
@@ -49,8 +61,16 @@ export default function WorldPage() {
   const [isReady, setIsReady] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [activeDialog, setActiveDialog] = useState<InteractiveObject | null>(null);
-  const [debugPos, setDebugPos] = useState({ x: 190, y: 140 });
-  const [zoomLevel, setZoomLevel] = useState<number>(1.5);
+  const [debugPos, setDebugPos] = useState({ x: 1184, y: 800 });
+  const [zoomLevel, setZoomLevel] = useState<number>(1.0);
+  const [isMapOpen, setIsMapOpen] = useState<boolean>(false);
+
+  // Dynamic Room Zone State
+  const [currentZone, setCurrentZone] = useState<HouseZone>(HOUSE_ZONES[4]); // Living Room
+  const currentRoomIdRef = useRef<string>(DEFAULT_ROOM_ID);
+
+  // Partner Room Zone State
+  const [remoteZone, setRemoteZone] = useState<HouseZone>(HOUSE_ZONES[4]);
 
   // Online Presence state
   const [currentUserId, setCurrentUserId] = useState<string>(SOPREMISH_USER_ID);
@@ -68,55 +88,57 @@ export default function WorldPage() {
 
   const liveKitDataSenderRef = useRef<((posData: any) => void) | null>(null);
 
-  // Local Player
+  // Local Player (Spawn in Living Room Center)
   const localPlayerRef = useRef<PlayerState>({
     id: SOPREMISH_USER_ID,
     name: 'Sopremish',
-    x: 190,
-    y: 140,
+    x: 1184,
+    y: 800,
     facing: 'down',
     isMoving: false,
     animFrame: 0,
     walkTimer: 0,
     avatarId: 'avatar_sopremish',
+    roomId: DEFAULT_ROOM_ID,
   });
 
   // Remote Player
   const remotePlayerRef = useRef<PlayerState>({
     id: GRAPE_USER_ID,
     name: 'Grape',
-    x: 230,
-    y: 140,
+    x: 1240,
+    y: 800,
     facing: 'down',
     isMoving: false,
     animFrame: 0,
     walkTimer: 0,
     avatarId: 'avatar_grape',
+    roomId: DEFAULT_ROOM_ID,
   });
 
   const remoteTargetRef = useRef<RemoteTargetState>({
-    x: 230,
-    y: 140,
+    x: 1240,
+    y: 800,
     facing: 'down',
     animFrame: 0,
     isMoving: false,
     seq: 0,
+    roomId: DEFAULT_ROOM_ID,
   });
 
   const lastRemoteHeartbeatRef = useRef<number>(0);
-  const lastRemoteSeqRef = useRef<number>(0);
   const localSeqRef = useRef<number>(1);
   const lastPublishedTimeRef = useRef<number>(0);
   const wasMovingRef = useRef<boolean>(false);
 
   // Camera & Viewport
   const cameraRef = useRef<CameraState>({
-    x: livingRoomDefinition.pixelWidth / 2,
-    y: livingRoomDefinition.pixelHeight / 2,
-    zoom: 1.5,
+    x: 1184,
+    y: 800,
+    zoom: 1.0,
   });
-  const targetZoomRef = useRef<number>(1.5);
-  const defaultCoverZoomRef = useRef<number>(1.5);
+  const targetZoomRef = useRef<number>(1.0);
+  const defaultZoomRef = useRef<number>(1.0);
   const viewportRef = useRef({ width: 800, height: 600 });
 
   const keysDownRef = useRef<Set<string>>(new Set());
@@ -132,7 +154,89 @@ export default function WorldPage() {
     activeDialogRef.current = activeDialog;
   }, [activeDialog]);
 
-  // Handle interaction trigger
+  // Position update broadcaster: broadcasts over LiveKit DataChannel (instant WebRTC) + Appwrite (persistent)
+  const publishPosition = useCallback(
+    async (x: number, y: number, direction: Direction, isMoving: boolean, animFrame: number) => {
+      const myId = currentUserIdRef.current;
+      const roomId = currentRoomIdRef.current;
+      const seq = ++localSeqRef.current;
+
+      // 1. Instant ultra-fast WebRTC data broadcast to connected peer
+      if (liveKitDataSenderRef.current) {
+        liveKitDataSenderRef.current({
+          x: Number(x.toFixed(1)),
+          y: Number(y.toFixed(1)),
+          facing: direction,
+          animFrame: Math.floor(animFrame),
+          isMoving,
+          seq,
+          room_id: roomId,
+        });
+      }
+
+      // 2. Persistent Appwrite database update
+      try {
+        const payload = {
+          user_id: myId,
+          world_id: WORLD_ID,
+          room_id: roomId,
+          x: Number(x.toFixed(1)),
+          y: Number(y.toFixed(1)),
+          direction,
+          anim_frame: Math.floor(animFrame),
+          is_moving: isMoving,
+          seq,
+          updated_at: Date.now(),
+        };
+
+        try {
+          await databases.updateDocument(
+            databaseId,
+            COLLECTIONS.PLAYER_STATES,
+            myId,
+            payload
+          );
+        } catch (err: any) {
+          if (err?.code === 404 || err?.message?.toLowerCase().includes('not found')) {
+            await databases.createDocument(
+              databaseId,
+              COLLECTIONS.PLAYER_STATES,
+              myId,
+              payload
+            ).catch(() => {});
+          }
+        }
+      } catch {
+        // Safe ignore network drops during movement
+      }
+    },
+    []
+  );
+
+  // Direct fast travel to any room in the house
+  const fastTravelToRoom = useCallback(
+    (targetRoomId: string) => {
+      const zone = HOUSE_ZONES.find((z) => z.id === targetRoomId) || HOUSE_ZONES[4];
+      const player = localPlayerRef.current;
+      player.x = zone.spawnPoint.x;
+      player.y = zone.spawnPoint.y;
+      player.isMoving = false;
+      player.walkTimer = 0;
+      player.animFrame = 0;
+      currentRoomIdRef.current = zone.id;
+      setCurrentZone(zone);
+      keysDownRef.current.clear();
+
+      // Center camera
+      cameraRef.current.x = player.x;
+      cameraRef.current.y = player.y;
+
+      publishPosition(player.x, player.y, player.facing, false, 0);
+    },
+    [publishPosition]
+  );
+
+  // Handle interaction trigger (Key E or Touch E)
   const handleTriggerInteraction = useCallback(() => {
     if (activeDialogRef.current) {
       setActiveDialog(null);
@@ -150,9 +254,9 @@ export default function WorldPage() {
     setZoomLevel(clamped);
   }, []);
 
-  const handleZoomIn = useCallback(() => applyZoom(targetZoomRef.current + 0.25), [applyZoom]);
-  const handleZoomOut = useCallback(() => applyZoom(targetZoomRef.current - 0.25), [applyZoom]);
-  const handleZoomReset = useCallback(() => applyZoom(defaultCoverZoomRef.current), [applyZoom]);
+  const handleZoomIn = useCallback(() => applyZoom(targetZoomRef.current + 0.2), [applyZoom]);
+  const handleZoomOut = useCallback(() => applyZoom(targetZoomRef.current - 0.2), [applyZoom]);
+  const handleZoomReset = useCallback(() => applyZoom(defaultZoomRef.current), [applyZoom]);
 
   // Handler for instant WebRTC LiveKit data packets
   const handlePositionDataReceivedFromLiveKit = useCallback((data: any) => {
@@ -160,13 +264,19 @@ export default function WorldPage() {
     lastRemoteHeartbeatRef.current = Date.now();
     setIsAppwriteRemoteOnline(true);
     isRemoteOnlineRef.current = true;
+    const targetX = Number(data.x);
+    const targetY = Number(data.y);
+    const zone = getRoomAtPosition(targetX, targetY);
+    setRemoteZone(zone);
+
     remoteTargetRef.current = {
-      x: Number(data.x),
-      y: Number(data.y),
+      x: targetX,
+      y: targetY,
       facing: (data.facing as Direction) || 'down',
       animFrame: data.animFrame || 0,
       isMoving: Boolean(data.isMoving),
       seq: data.seq || 0,
+      roomId: data.room_id || zone.id,
     };
   }, []);
 
@@ -263,16 +373,22 @@ export default function WorldPage() {
             otherId
           );
           if (doc && isSubscribed) {
-            remotePlayerRef.current.x = Number(doc.x);
-            remotePlayerRef.current.y = Number(doc.y);
+            const docX = Number(doc.x);
+            const docY = Number(doc.y);
+            remotePlayerRef.current.x = docX;
+            remotePlayerRef.current.y = docY;
             remotePlayerRef.current.facing = (doc.direction as Direction) || 'down';
+            const zone = getRoomAtPosition(docX, docY);
+            setRemoteZone(zone);
+
             remoteTargetRef.current = {
-              x: Number(doc.x),
-              y: Number(doc.y),
+              x: docX,
+              y: docY,
               facing: (doc.direction as Direction) || 'down',
               animFrame: doc.anim_frame || 0,
               isMoving: Boolean(doc.is_moving),
               seq: doc.seq || 0,
+              roomId: doc.room_id || zone.id,
             };
             // If updated in last 30 seconds, mark online
             if (doc.updated_at && Date.now() - Number(doc.updated_at) < 30000) {
@@ -285,10 +401,11 @@ export default function WorldPage() {
           // Use default spawn if not yet recorded
         }
 
-        // Publish local player's initial position to ensure document exists
+        // Publish local player's initial position
         const initialPayload = {
           user_id: myId,
           world_id: WORLD_ID,
+          room_id: currentRoomIdRef.current,
           x: localPlayerRef.current.x,
           y: localPlayerRef.current.y,
           direction: localPlayerRef.current.facing,
@@ -315,7 +432,7 @@ export default function WorldPage() {
           }
         }
 
-        // Subscribe to Appwrite Realtime for both collection and document channels
+        // Subscribe to Appwrite Realtime
         const channels = [
           `databases.${databaseId}.collections.${COLLECTIONS.PLAYER_STATES}.documents`,
           `databases.${databaseId}.collections.${COLLECTIONS.PLAYER_STATES}.documents.${otherId}`,
@@ -330,7 +447,6 @@ export default function WorldPage() {
           const packetTime = Number(payload.updated_at) || Date.now();
           const lastTime = lastRemoteHeartbeatRef.current || 0;
 
-          // Reject only if genuinely older by > 500ms
           if (packetTime > 0 && lastTime > 0 && packetTime < lastTime - 500) {
             return;
           }
@@ -339,13 +455,19 @@ export default function WorldPage() {
           setIsAppwriteRemoteOnline(true);
           isRemoteOnlineRef.current = true;
 
+          const rx = Number(payload.x);
+          const ry = Number(payload.y);
+          const rZone = getRoomAtPosition(rx, ry);
+          setRemoteZone(rZone);
+
           remoteTargetRef.current = {
-            x: Number(payload.x),
-            y: Number(payload.y),
+            x: rx,
+            y: ry,
             facing: (payload.direction as Direction) || 'down',
             animFrame: payload.anim_frame || 0,
             isMoving: Boolean(payload.is_moving),
             seq: payload.seq || 0,
+            roomId: payload.room_id || rZone.id,
           };
         });
       } catch (err) {
@@ -355,7 +477,7 @@ export default function WorldPage() {
 
     initUserAndMultiplayer();
 
-    // Heartbeat checker interval (checks if remote player went offline in Appwrite)
+    // Heartbeat checker interval
     const presenceInterval = setInterval(() => {
       if (lastRemoteHeartbeatRef.current > 0) {
         const diff = Date.now() - lastRemoteHeartbeatRef.current;
@@ -369,14 +491,14 @@ export default function WorldPage() {
       }
     }, 3000);
 
-    // Periodic stationary heartbeat: keeps local player's updated_at fresh even when standing still
+    // Periodic stationary heartbeat
     const stationaryHeartbeat = setInterval(() => {
       if (!isSubscribed) return;
       const player = localPlayerRef.current;
       publishPosition(player.x, player.y, player.facing, false, 0);
     }, 3500);
 
-    // Reliable polling fallback: synchronizes position even if WebSocket is throttled
+    // Polling fallback
     const pollInterval = setInterval(async () => {
       if (!isSubscribed) return;
       try {
@@ -391,15 +513,21 @@ export default function WorldPage() {
           if (Date.now() - docTime < 25000) {
             setIsAppwriteRemoteOnline(true);
             isRemoteOnlineRef.current = true;
+            const rx = Number(doc.x);
+            const ry = Number(doc.y);
+            const rZone = getRoomAtPosition(rx, ry);
+            setRemoteZone(rZone);
+
             if (docTime > (lastRemoteHeartbeatRef.current || 0)) {
               lastRemoteHeartbeatRef.current = docTime;
               remoteTargetRef.current = {
-                x: Number(doc.x),
-                y: Number(doc.y),
+                x: rx,
+                y: ry,
                 facing: (doc.direction as Direction) || 'down',
                 animFrame: doc.anim_frame || 0,
                 isMoving: Boolean(doc.is_moving),
                 seq: doc.seq || 0,
+                roomId: doc.room_id || rZone.id,
               };
             }
           }
@@ -416,7 +544,7 @@ export default function WorldPage() {
         unsubscribeRealtime();
       }
     };
-  }, []);
+  }, [publishPosition]);
 
   // Initialize Sprite Atlas and Viewport Resizing
   useEffect(() => {
@@ -433,11 +561,9 @@ export default function WorldPage() {
         canvasRef.current.height = height;
       }
 
-      const scaleX = width / livingRoomDefinition.pixelWidth;
-      const scaleY = height / livingRoomDefinition.pixelHeight;
-      const cover = Math.max(scaleX, scaleY);
-      const sensibleCover = clamp(Number(cover.toFixed(2)), 1.1, 2.5);
-      defaultCoverZoomRef.current = sensibleCover;
+      // Default comfortable zoom showing the current room and surroundings
+      const sensibleCover = clamp(Number((height / 900).toFixed(2)), 0.7, 1.4);
+      defaultZoomRef.current = sensibleCover;
 
       if (!isReady) {
         targetZoomRef.current = sensibleCover;
@@ -462,7 +588,7 @@ export default function WorldPage() {
   useEffect(() => {
     const handleWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const step = e.deltaY < 0 ? 0.2 : -0.2;
+      const step = e.deltaY < 0 ? 0.15 : -0.15;
       applyZoom(targetZoomRef.current + step);
     };
 
@@ -488,10 +614,21 @@ export default function WorldPage() {
         return;
       }
 
+      if (e.code === 'KeyM' || e.key === 'm' || e.key === 'M') {
+        e.preventDefault();
+        setIsMapOpen((prev) => !prev);
+        return;
+      }
+
       if (e.code === 'Escape') {
         if (activeDialogRef.current) {
           e.preventDefault();
           setActiveDialog(null);
+          return;
+        }
+        if (isMapOpen) {
+          e.preventDefault();
+          setIsMapOpen(false);
           return;
         }
       }
@@ -539,63 +676,7 @@ export default function WorldPage() {
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('blur', handleBlur);
     };
-  }, [handleTriggerInteraction, handleZoomIn, handleZoomOut, handleZoomReset]);
-
-  // Position update broadcaster: broadcasts over LiveKit DataChannel (instant WebRTC) + Appwrite (persistent)
-  const publishPosition = useCallback(
-    async (x: number, y: number, direction: Direction, isMoving: boolean, animFrame: number) => {
-      const myId = currentUserIdRef.current;
-      const seq = ++localSeqRef.current;
-
-      // 1. Instant ultra-fast WebRTC data broadcast to connected peer
-      if (liveKitDataSenderRef.current) {
-        liveKitDataSenderRef.current({
-          x: Number(x.toFixed(1)),
-          y: Number(y.toFixed(1)),
-          facing: direction,
-          animFrame: Math.floor(animFrame),
-          isMoving,
-          seq,
-        });
-      }
-
-      // 2. Persistent Appwrite database update
-      try {
-        const payload = {
-          user_id: myId,
-          world_id: WORLD_ID,
-          x: Number(x.toFixed(1)),
-          y: Number(y.toFixed(1)),
-          direction,
-          anim_frame: Math.floor(animFrame),
-          is_moving: isMoving,
-          seq,
-          updated_at: Date.now(),
-        };
-
-        try {
-          await databases.updateDocument(
-            databaseId,
-            COLLECTIONS.PLAYER_STATES,
-            myId,
-            payload
-          );
-        } catch (err: any) {
-          if (err?.code === 404 || err?.message?.toLowerCase().includes('not found')) {
-            await databases.createDocument(
-              databaseId,
-              COLLECTIONS.PLAYER_STATES,
-              myId,
-              payload
-            ).catch(() => {});
-          }
-        }
-      } catch {
-        // Safe ignore network drops during movement
-      }
-    },
-    []
-  );
+  }, [handleTriggerInteraction, handleZoomIn, handleZoomOut, handleZoomReset, isMapOpen]);
 
   // Main 60 FPS Game Loop
   useEffect(() => {
@@ -614,9 +695,10 @@ export default function WorldPage() {
         const player = localPlayerRef.current;
         const remotePlayer = remotePlayerRef.current;
         const isDialogOpen = activeDialogRef.current !== null;
+        const isOverlayOpen = isDialogOpen || isMapOpen;
 
-        // 1. LOCAL PLAYER MOVEMENT
-        if (!isDialogOpen) {
+        // 1. LOCAL PLAYER CONTINUOUS MOVEMENT ACROSS ENTIRE HOUSE
+        if (!isOverlayOpen) {
           const keys = keysDownRef.current;
           const up = keys.has('KeyW') || keys.has('ArrowUp') || keys.has('w');
           const down = keys.has('KeyS') || keys.has('ArrowDown') || keys.has('s');
@@ -647,7 +729,7 @@ export default function WorldPage() {
               { x: player.x, y: player.y },
               moveX,
               moveY,
-              livingRoomDefinition
+              houseDefinition
             );
 
             player.x = resolved.x;
@@ -659,7 +741,14 @@ export default function WorldPage() {
 
             setDebugPos({ x: Math.round(player.x), y: Math.round(player.y) });
 
-            // Throttled publish to Appwrite Cloud
+            // Check current room zone dynamically
+            const activeZone = getRoomAtPosition(player.x, player.y);
+            if (activeZone.id !== currentRoomIdRef.current) {
+              currentRoomIdRef.current = activeZone.id;
+              setCurrentZone(activeZone);
+            }
+
+            // Throttled publish to WebRTC LiveKit & Appwrite Cloud
             if (now - lastPublishedTimeRef.current >= PUBLISH_INTERVAL_MS) {
               publishPosition(player.x, player.y, player.facing, true, player.animFrame);
               lastPublishedTimeRef.current = now;
@@ -676,24 +765,22 @@ export default function WorldPage() {
             player.animFrame = 0;
           }
 
-          // Check proximity to interactive objects
-          const nearby = findNearbyInteractiveObject(
+          // Check proximity to interactive objects across the entire house
+          nearbyInteractiveRef.current = findNearbyInteractiveObject(
             { x: player.x, y: player.y },
-            livingRoomDefinition
+            houseDefinition
           );
-          nearbyInteractiveRef.current = nearby;
         } else {
           player.isMoving = false;
         }
 
-        // 2. REMOTE PLAYER INTERPOLATION (Smooth Lerp)
+        // 2. REMOTE PLAYER INTERPOLATION (Smooth Lerp in unified world space)
         const target = remoteTargetRef.current;
         if (target) {
           const distX = target.x - remotePlayer.x;
           const distY = target.y - remotePlayer.y;
 
-          // If close, smoothly interpolate. If huge gap (initial join), snap.
-          if (Math.hypot(distX, distY) > 160) {
+          if (Math.hypot(distX, distY) > 200) {
             remotePlayer.x = target.x;
             remotePlayer.y = target.y;
           } else {
@@ -706,7 +793,7 @@ export default function WorldPage() {
           remotePlayer.animFrame = target.animFrame;
         }
 
-        // 3. CAMERA FOLLOWING & CLAMPING
+        // 3. CAMERA FOLLOWING & CLAMPING TO ENTIRE HOUSE (2400 x 1600)
         const camera = cameraRef.current;
         const targetZoom = targetZoomRef.current;
         camera.zoom += (targetZoom - camera.zoom) * 0.15;
@@ -720,35 +807,36 @@ export default function WorldPage() {
         let desiredCamX = targetX;
         let desiredCamY = targetY;
 
-        if (visibleWorldW >= livingRoomDefinition.pixelWidth) {
-          desiredCamX = livingRoomDefinition.pixelWidth / 2;
+        if (visibleWorldW >= houseDefinition.pixelWidth) {
+          desiredCamX = houseDefinition.pixelWidth / 2;
         } else {
           desiredCamX = clamp(
             targetX,
             visibleWorldW / 2,
-            livingRoomDefinition.pixelWidth - visibleWorldW / 2
+            houseDefinition.pixelWidth - visibleWorldW / 2
           );
         }
 
-        if (visibleWorldH >= livingRoomDefinition.pixelHeight) {
-          desiredCamY = livingRoomDefinition.pixelHeight / 2;
+        if (visibleWorldH >= houseDefinition.pixelHeight) {
+          desiredCamY = houseDefinition.pixelHeight / 2;
         } else {
           desiredCamY = clamp(
             targetY,
             visibleWorldH / 2,
-            livingRoomDefinition.pixelHeight - visibleWorldH / 2
+            houseDefinition.pixelHeight - visibleWorldH / 2
           );
         }
 
         camera.x += (desiredCamX - camera.x) * 0.12;
         camera.y += (desiredCamY - camera.y) * 0.12;
 
-        // 4. RENDER LIVING ROOM WITH PLAYERS (Standalone: only render partner if online)
+        // 4. RENDER ALL 9 ROOMS DIRECTLY ON CANVAS (Simultaneous top view)
         if (atlasRef.current) {
           const playersToRender = isRemoteOnlineRef.current ? [player, remotePlayer] : [player];
-          renderLivingRoom(
+
+          renderHouseRoom(
             ctx,
-            livingRoomDefinition,
+            houseDefinition,
             atlasRef.current,
             playersToRender,
             player.id,
@@ -772,7 +860,7 @@ export default function WorldPage() {
         cancelAnimationFrame(animFrameIdRef.current);
       }
     };
-  }, [isReady, publishPosition]);
+  }, [isReady, publishPosition, isMapOpen]);
 
   // Touch handlers for mobile virtual controls
   const handleTouchDirStart = (code: string) => keysDownRef.current.add(code);
@@ -782,7 +870,6 @@ export default function WorldPage() {
   const handleLogout = async () => {
     setIsLoggingOut(true);
     try {
-      // 1. Send stopped state to Appwrite
       await publishPosition(
         localPlayerRef.current.x,
         localPlayerRef.current.y,
@@ -790,13 +877,9 @@ export default function WorldPage() {
         false,
         0
       );
-      // 2. Delete Appwrite Session
       await account.deleteSession('current').catch(() => {});
-      // 3. Clear Next.js server cookie
       await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
-    } catch {
-      // Proceed with redirect regardless
-    }
+    } catch {}
     window.location.href = '/login';
   };
 
@@ -815,6 +898,21 @@ export default function WorldPage() {
           {/* Local User Badge */}
           <span className="hud-pill" style={{ color: currentUserId === SOPREMISH_USER_ID ? '#00e5ff' : '#d67eff' }}>
             ● {myUserName} (You)
+          </span>
+
+          {/* Current Dynamic Room Zone Pill */}
+          <span
+            className="hud-pill hud-room-pill"
+            style={{
+              color: '#00e5ff',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontWeight: 600,
+            }}
+          >
+            <span>{currentZone.icon}</span>
+            <span>{currentZone.name}</span>
           </span>
 
           {/* Remote Player Presence Indicator */}
@@ -836,10 +934,25 @@ export default function WorldPage() {
                 boxShadow: isRemoteOnline ? '0 0 8px #2ed573' : 'none',
               }}
             />
-            {otherUserName} {isRemoteOnline ? 'Online' : 'Offline'}
+            <span>{otherUserName}</span>
+            <span style={{ fontSize: '11px', opacity: 0.9 }}>
+              {isRemoteOnline ? `in ${remoteZone.name}` : 'Offline'}
+            </span>
           </span>
 
-          <span className="hud-pill">
+          {/* House Directory & Fast Travel Button */}
+          <button
+            type="button"
+            id="house-map-button"
+            className="hud-map-btn"
+            onClick={() => setIsMapOpen(true)}
+            aria-label="Open House Directory"
+            title="House Directory (M)"
+          >
+            🗺️ Directory
+          </button>
+
+          <span className="hud-pill hud-coords">
             X: {debugPos.x} | Y: {debugPos.y}
           </span>
         </div>
@@ -872,7 +985,7 @@ export default function WorldPage() {
           id="living-room-canvas"
           className="pixel-canvas"
           role="img"
-          aria-label="Cozy pixel-art living room covering full window"
+          aria-label="Contiguous 9-room multiplayer pixel-art house"
         />
       </div>
 
@@ -939,25 +1052,26 @@ export default function WorldPage() {
             <p className="interaction-desc">{activeDialog.description}</p>
 
             <div className="interaction-action-row" style={{ display: 'flex', gap: '8px', alignItems: 'center', justifyContent: 'space-between' }}>
-              {activeDialog.id === 'interact_tv' ? (
+              {activeDialog.id === 'interact_tv' || activeDialog.id === 'interact_theatre_screen' ? (
                 <button
                   type="button"
                   style={{
-                    padding: '6px 14px',
-                    borderRadius: '6px',
+                    padding: '8px 16px',
+                    borderRadius: '8px',
                     border: '1px solid #00e5ff',
                     background: 'rgba(0, 229, 255, 0.15)',
                     color: '#00e5ff',
                     fontWeight: 600,
                     fontSize: '12px',
                     cursor: 'pointer',
+                    boxShadow: '0 0 12px rgba(0, 229, 255, 0.25)',
                   }}
                   onClick={() => {
                     setActiveDialog(null);
                     document.getElementById('tv-header-button')?.click();
                   }}
                 >
-                  📺 Turn On TV / Watch Broadcast
+                  📺 {activeDialog.id === 'interact_theatre_screen' ? 'Watch Cinema Screen / Broadcast' : 'Turn On TV / Watch Broadcast'}
                 </button>
               ) : (
                 <span className="interaction-hint-text">Press [Esc] or [E] to return</span>
@@ -974,11 +1088,113 @@ export default function WorldPage() {
         </div>
       )}
 
+      {/* House Directory Modal */}
+      {isMapOpen && (
+        <div
+          className="house-map-modal-overlay"
+          onClick={() => setIsMapOpen(false)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="house-map-modal-card"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="house-map-header">
+              <div className="house-map-header-title">
+                <span className="house-map-badge">Direct Overview</span>
+                <h2 className="house-map-title">🗺️ BERK HOUSE DIRECTORY</h2>
+                <p className="house-map-subtitle">
+                  All 9 rooms are visible directly in the top view. Walk anywhere freely or click below to fast-travel.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="house-map-close-btn"
+                onClick={() => setIsMapOpen(false)}
+                aria-label="Close Map"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="house-map-grid">
+              {HOUSE_ZONES.map((zone) => {
+                const isCurrent = zone.id === currentZone.id;
+                const isPartnerHere = isRemoteOnline && zone.id === remoteZone.id;
+
+                return (
+                  <div
+                    key={zone.id}
+                    className={`house-map-card ${isCurrent ? 'active-current-room' : ''} ${
+                      isPartnerHere ? 'partner-room' : ''
+                    }`}
+                  >
+                    <div className="house-map-card-header">
+                      <span className="house-map-card-icon">{zone.icon}</span>
+                      <div className="house-map-card-info">
+                        <h3 className="house-map-card-name">{zone.name}</h3>
+                        <span className="house-map-card-dims">
+                          {Math.round(zone.bounds.width / 32)}×{Math.round(zone.bounds.height / 32)} tiles
+                        </span>
+                      </div>
+                    </div>
+
+                    <p className="house-map-card-desc">{zone.description}</p>
+
+                    <div className="house-map-occupancy">
+                      {isCurrent && (
+                        <span className="occupancy-pill you-here">
+                          ● You are here
+                        </span>
+                      )}
+                      {isPartnerHere && (
+                        <span className="occupancy-pill partner-here">
+                          ● {otherUserName} is here
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="house-map-card-footer">
+                      {isCurrent ? (
+                        <button
+                          type="button"
+                          className="house-travel-btn current"
+                          disabled
+                        >
+                          Current Location
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="house-travel-btn"
+                          onClick={() => {
+                            fastTravelToRoom(zone.id);
+                            setIsMapOpen(false);
+                          }}
+                        >
+                          Walk to {zone.name} →
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="house-map-footer">
+              <span>Tip: Zoom out to see the entire house at once • Press <kbd className="map-kbd">M</kbd> or <kbd className="map-kbd">Esc</kbd> to close</span>
+              <span>All 9 rooms visible directly</span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Controls Hint */}
       <footer className="controls-hint" aria-hidden="true">
         Move: <span className="key-badge">W</span> <span className="key-badge">A</span>{' '}
         <span className="key-badge">S</span> <span className="key-badge">D</span> • Inspect:{' '}
-        <span className="key-badge">E</span> • Zoom:{' '}
+        <span className="key-badge">E</span> • Directory: <span className="key-badge">M</span> • Zoom Top View:{' '}
         <span className="key-badge">Scroll</span> or <span className="key-badge">+</span>/<span className="key-badge">-</span>
       </footer>
 

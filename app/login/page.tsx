@@ -94,46 +94,28 @@ export default function LoginPage() {
     <main className="login-container">
       <div className="login-card">
         <header className="login-header">
-          <span className="login-badge">BERK • PRIVATE WORLD</span>
-          <h1 className="login-title">Enter Living Room</h1>
-          <p className="login-subtitle">Private access for Sopremish &amp; Grape</p>
+          <span className="login-badge">★ BERK • RESIDENCE ★</span>
+          <h1 className="login-title">VIRTUAL HOME</h1>
+          <p className="login-subtitle">SELECT CHARACTER &amp; ENTER</p>
         </header>
 
-        {/* Quick Identity Selector Pills */}
-        <div style={{ display: 'flex', gap: '8px', marginBottom: '20px', justifyContent: 'center' }}>
+        {/* Pixel Character Selector */}
+        <div className="character-select-row">
           <button
             type="button"
             onClick={() => selectUser(SOPREMISH_USER_ID)}
-            style={{
-              padding: '6px 14px',
-              borderRadius: '999px',
-              fontSize: '12px',
-              fontWeight: 600,
-              cursor: 'pointer',
-              border: email === AUTHORIZED_USERS[SOPREMISH_USER_ID]?.email ? '1px solid #00e5ff' : '1px solid rgba(255,255,255,0.12)',
-              background: email === AUTHORIZED_USERS[SOPREMISH_USER_ID]?.email ? 'rgba(0, 229, 255, 0.15)' : 'rgba(255,255,255,0.05)',
-              color: email === AUTHORIZED_USERS[SOPREMISH_USER_ID]?.email ? '#00e5ff' : '#a0aec0',
-              transition: 'all 0.15s ease',
-            }}
+            className={`pixel-char-btn sopremish ${email === AUTHORIZED_USERS[SOPREMISH_USER_ID]?.email ? 'selected' : ''}`}
           >
-            Sopremish
+            <span className="pixel-char-icon">👨‍💻</span>
+            <span>SOPREMISH</span>
           </button>
           <button
             type="button"
             onClick={() => selectUser(GRAPE_USER_ID)}
-            style={{
-              padding: '6px 14px',
-              borderRadius: '999px',
-              fontSize: '12px',
-              fontWeight: 600,
-              cursor: 'pointer',
-              border: email === AUTHORIZED_USERS[GRAPE_USER_ID]?.email ? '1px solid #d67eff' : '1px solid rgba(255,255,255,0.12)',
-              background: email === AUTHORIZED_USERS[GRAPE_USER_ID]?.email ? 'rgba(214, 126, 255, 0.15)' : 'rgba(255,255,255,0.05)',
-              color: email === AUTHORIZED_USERS[GRAPE_USER_ID]?.email ? '#d67eff' : '#a0aec0',
-              transition: 'all 0.15s ease',
-            }}
+            className={`pixel-char-btn grape ${email === AUTHORIZED_USERS[GRAPE_USER_ID]?.email ? 'selected' : ''}`}
           >
-            Grape
+            <span className="pixel-char-icon">🍇</span>
+            <span>GRAPE</span>
           </button>
         </div>
 
@@ -196,7 +178,7 @@ export default function LoginPage() {
             className="submit-btn"
             disabled={isLoading || (!email && !password)}
           >
-            {isLoading ? 'Verifying...' : 'Enter Living Room'}
+            {isLoading ? 'VERIFYING...' : '▶ ENTER RESIDENCE'}
           </button>
         </form>
       </div>

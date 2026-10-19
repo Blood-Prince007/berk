@@ -22,7 +22,7 @@ export interface PlayerState {
   animFrame: number;
   walkTimer: number;
   avatarId?: string;
-  // Prepared for Phase 2 multiplayer:
+  roomId?: string;
   avatarColor?: {
     sweater: string;
     hair: string;
@@ -40,6 +40,16 @@ export interface InteractiveObject {
   actionText?: string;
 }
 
+export interface Doorway {
+  id: string;
+  name: string; // e.g. "Kitchen", "SOPREMISH'S LAB"
+  targetRoomId: string;
+  targetSpawn: Position;
+  facingOnArrival?: Direction;
+  bounds: Rect; // Trigger area where player steps to transition
+  promptPosition: Position; // Floating "[E] Enter Kitchen" prompt
+}
+
 export interface RoomObject {
   id: string;
   spriteKey: string;
@@ -53,18 +63,40 @@ export interface RoomObject {
   solidBox?: Rect;
 }
 
+export type RoomTheme =
+  | 'living_room'
+  | 'kitchen'
+  | 'bedroom'
+  | 'balcony'
+  | 'garage'
+  | 'theatre'
+  | 'working_lab'
+  | 'bathroom'
+  | 'store_room';
+
 export interface RoomDefinition {
   id: string;
   name: string;
-  tileWidth: number; // In tiles (e.g. 22)
-  tileHeight: number; // In tiles (e.g. 15)
-  tileSize: number; // In pixels (e.g. 32)
+  theme: RoomTheme;
+  icon: string;
+  description?: string;
+  tileWidth: number; // In tiles
+  tileHeight: number; // In tiles
+  tileSize: number; // In pixels (32)
   pixelWidth: number; // tileWidth * tileSize
   pixelHeight: number; // tileHeight * tileSize
   playerSpawn: Position;
+  floorSpriteKey?: string;
+  wallTheme?: string;
   walls: Rect[]; // Solid wall collision boxes
+  doors: Doorway[]; // Doorways connecting to other rooms
   furniture: RoomObject[];
   interactiveObjects: InteractiveObject[];
+  ambientLighting?: {
+    color: string;
+    intensity: number;
+    pulseSpeed?: number;
+  };
 }
 
 export interface CameraState {

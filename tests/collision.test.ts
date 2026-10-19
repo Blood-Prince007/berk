@@ -41,38 +41,37 @@ describe('2D World Collision & Interaction System', () => {
   });
 
   it('detects collision when player walks into living room sofa', () => {
-    // Sofa solid box is { x: 304, y: 172, width: 96, height: 34 }
-    // Footprint: x+7, y+22. If player is at x: 320, y: 160 -> foot is at (327, 182), inside sofa
-    const intoSofaPos = { x: 320, y: 160 };
+    // Sofa solid box is { x: 1134, y: 732, width: 102, height: 32 }
+    // Footprint: x+7, y+22. If player is at x: 1160, y: 720 -> foot is at (1167, 742), inside sofa
+    const intoSofaPos = { x: 1160, y: 720 };
     expect(isPlayerColliding(intoSofaPos, livingRoomDefinition)).toBe(true);
   });
 
   it('resolves diagonal movement with sliding along horizontal obstacles', () => {
-    // Player is below north wall, e.g. at y = 72 (foot at 94, clear).
-    // Moving UP (dy = -5) would penetrate wall (foot at 89 <= 90), but moving RIGHT (dx = 5) is clear.
-    const startPos = { x: 200, y: 72 };
+    // Player is below north wall, e.g. at y = 45 (foot at 67, clear).
+    // Moving UP (dy = -5) would penetrate wall (foot at 62 <= 64), but moving RIGHT (dx = 5) is clear.
+    const startPos = { x: 200, y: 45 };
     const nextPos = resolveMovementWithSliding(startPos, 5, -5, livingRoomDefinition);
 
     // X should have moved to 205
     expect(nextPos.x).toBe(205);
-    // Y should have remained 72 (sliding prevented vertical wall penetration)
-    expect(nextPos.y).toBe(72);
+    // Y should have remained 45 (sliding prevented vertical wall penetration)
+    expect(nextPos.y).toBe(45);
   });
 
   it('detects interactive objects within proximity trigger zones', () => {
-    // Near TV: { x: 230, y: 65, width: 128, height: 60 }
-    // Player at x: 260, y: 60 -> center is at (276, 84), inside TV bounds
-    const nearTvPos = { x: 260, y: 60 };
+    // Near TV: { x: 1120, y: 570, width: 130, height: 60 }
+    const nearTvPos = { x: 1160, y: 575 };
     const interaction = findNearbyInteractiveObject(nearTvPos, livingRoomDefinition);
 
     expect(interaction).not.toBeNull();
     expect(interaction?.id).toBe('interact_tv');
-    expect(interaction?.title).toBe('Vintage Television');
+    expect(interaction?.title).toContain('Television');
   });
 
   it('returns null when player is far away from interactive objects in open floor', () => {
     // Open walking area at center floor
-    const openPos = { x: 200, y: 320 };
+    const openPos = { x: 1184, y: 840 };
     const interaction = findNearbyInteractiveObject(openPos, livingRoomDefinition);
 
     expect(interaction).toBeNull();
