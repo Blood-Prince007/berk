@@ -662,6 +662,19 @@ body {
   animation: callPulse 1.5s infinite ease-in-out;
 }
 
+.livekit-join-pill-btn.incoming-call {
+  background: rgba(46, 213, 115, 0.2);
+  border-color: #2ed573;
+  color: #2ed573;
+  animation: callPulseGreen 1.3s infinite ease-in-out;
+}
+
+@keyframes callPulseGreen {
+  0% { box-shadow: 0 0 0 0 rgba(46, 213, 115, 0.6); }
+  70% { box-shadow: 0 0 0 10px rgba(46, 213, 115, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(46, 213, 115, 0); }
+}
+
 @keyframes callPulse {
   0% { box-shadow: 0 0 0 0 rgba(0, 229, 255, 0.4); }
   70% { box-shadow: 0 0 0 8px rgba(0, 229, 255, 0); }

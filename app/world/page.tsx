@@ -170,6 +170,21 @@ export default function WorldPage() {
     };
   }, []);
 
+  const handleScreenVideoElementChange = useCallback((el: HTMLVideoElement | null) => {
+    activeScreenVideoRef.current = el;
+  }, []);
+
+  const handleRemoteParticipantChange = useCallback((hasRemote: boolean) => {
+    setIsLiveKitRemoteConnected(hasRemote);
+    if (hasRemote) {
+      isRemoteOnlineRef.current = true;
+    }
+  }, []);
+
+  const handleSendPositionDataReady = useCallback((sender: ((posData: any) => void) | null) => {
+    liveKitDataSenderRef.current = sender;
+  }, []);
+
   // Authenticate user & initialize multiplayer identity
   useEffect(() => {
     let isSubscribed = true;
@@ -832,19 +847,10 @@ export default function WorldPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', pointerEvents: 'auto' }}>
           <LiveKitVideoChat
             currentUserId={currentUserId}
-            onScreenVideoElementChange={(el) => {
-              activeScreenVideoRef.current = el;
-            }}
-            onRemoteParticipantChange={(hasRemote) => {
-              setIsLiveKitRemoteConnected(hasRemote);
-              if (hasRemote) {
-                isRemoteOnlineRef.current = true;
-              }
-            }}
+            onScreenVideoElementChange={handleScreenVideoElementChange}
+            onRemoteParticipantChange={handleRemoteParticipantChange}
             onPositionDataReceived={handlePositionDataReceivedFromLiveKit}
-            onSendPositionDataReady={(sender) => {
-              liveKitDataSenderRef.current = sender;
-            }}
+            onSendPositionDataReady={handleSendPositionDataReady}
           />
           <button
             type="button"

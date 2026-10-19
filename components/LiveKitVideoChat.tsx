@@ -49,6 +49,7 @@ export default function LiveKitVideoChat({
   const [remoteParticipantName, setRemoteParticipantName] = useState<string>('Partner');
   const [isRemoteCamActive, setIsRemoteCamActive] = useState<boolean>(false);
   const [isRemoteMicActive, setIsRemoteMicActive] = useState<boolean>(false);
+  const [isRemoteInCall, setIsRemoteInCall] = useState<boolean>(false);
 
   // Screen Sharing states
   const [isScreenSharing, setIsScreenSharing] = useState<boolean>(false);
@@ -62,7 +63,7 @@ export default function LiveKitVideoChat({
   const [isScreenViewerMaximized, setIsScreenViewerMaximized] = useState<boolean>(false);
   const [isRemoteScreenLoading, setIsRemoteScreenLoading] = useState<boolean>(false);
 
-  // Reactive Track States (fixes track attachment timing and dynamic element mounting)
+  // Reactive Track States
   const [remoteScreenTrack, setRemoteScreenTrack] = useState<Track | null>(null);
   const [localScreenTrack, setLocalScreenTrack] = useState<Track | null>(null);
   const [remoteScreenAudioTrack, setRemoteScreenAudioTrack] = useState<Track | null>(null);
@@ -80,9 +81,14 @@ export default function LiveKitVideoChat({
   const remoteScreenVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteScreenAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Avoid stale closures in event listener callbacks
+  // State refs to eliminate stale closures
   const isScreenSharingRef = useRef<boolean>(false);
   const isRemoteScreenActiveRef = useRef<boolean>(false);
+  const isOpenRef = useRef<boolean>(false);
+  const isCamEnabledRef = useRef<boolean>(true);
+  const isMountedRef = useRef<boolean>(true);
+  const hasUserLeftCallRef = useRef<boolean>(false);
+  const roomRef = useRef<Room | null>(null);
 
   useEffect(() => {
     isScreenSharingRef.current = isScreenSharing;
@@ -92,7 +98,34 @@ export default function LiveKitVideoChat({
     isRemoteScreenActiveRef.current = isRemoteScreenActive;
   }, [isRemoteScreenActive]);
 
-  const roomRef = useRef<Room | null>(null);
+  useEffect(() => {
+    isOpenRef.current = isOpen;
+  }, [isOpen]);
+
+  useEffect(() => {
+    isCamEnabledRef.current = isCamEnabled;
+  }, [isCamEnabled]);
+
+  // Stable callback refs from parent to prevent unnecessary room disconnections or re-renders
+  const onScreenVideoElementChangeRef = useRef(onScreenVideoElementChange);
+  useEffect(() => {
+    onScreenVideoElementChangeRef.current = onScreenVideoElementChange;
+  }, [onScreenVideoElementChange]);
+
+  const onRemoteParticipantChangeRef = useRef(onRemoteParticipantChange);
+  useEffect(() => {
+    onRemoteParticipantChangeRef.current = onRemoteParticipantChange;
+  }, [onRemoteParticipantChange]);
+
+  const onPositionDataReceivedRef = useRef(onPositionDataReceived);
+  useEffect(() => {
+    onPositionDataReceivedRef.current = onPositionDataReceived;
+  }, [onPositionDataReceived]);
+
+  const onSendPositionDataReadyRef = useRef(onSendPositionDataReady);
+  useEffect(() => {
+    onSendPositionDataReadyRef.current = onSendPositionDataReady;
+  }, [onSendPositionDataReady]);
 
   // Participant names
   const localProfile = AUTHORIZED_USERS[currentUserId] || AUTHORIZED_USERS[SOPREMISH_USER_ID];
@@ -101,20 +134,19 @@ export default function LiveKitVideoChat({
 
   // Inform parent when screen video element is mounted/changed
   useEffect(() => {
-    if (!onScreenVideoElementChange) return;
+    if (!onScreenVideoElementChangeRef.current) return;
     if (isRemoteScreenActive && remoteScreenVideoRef.current) {
-      onScreenVideoElementChange(remoteScreenVideoRef.current);
+      onScreenVideoElementChangeRef.current(remoteScreenVideoRef.current);
     } else if (isScreenSharing && localScreenVideoRef.current) {
-      onScreenVideoElementChange(localScreenVideoRef.current);
+      onScreenVideoElementChangeRef.current(localScreenVideoRef.current);
     } else {
-      onScreenVideoElementChange(null);
+      onScreenVideoElementChangeRef.current(null);
     }
   }, [
     isRemoteScreenActive,
     isScreenSharing,
     remoteScreenTrack,
     localScreenTrack,
-    onScreenVideoElementChange,
   ]);
 
   // Cleanly detach ONLY remote tracks (called on peer disconnect / refresh so local tracks remain untouched)
@@ -126,16 +158,17 @@ export default function LiveKitVideoChat({
     setIsRemoteCamActive(false);
     setIsRemoteMicActive(false);
     setIsRemoteScreenActive(false);
+    setIsRemoteInCall(false);
     setHasRemoteScreenAudio(false);
     setIsRemoteScreenLoading(false);
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
     if (remoteScreenVideoRef.current) remoteScreenVideoRef.current.srcObject = null;
     if (remoteScreenAudioRef.current) remoteScreenAudioRef.current.srcObject = null;
-    if (!isScreenSharingRef.current && onScreenVideoElementChange) {
-      onScreenVideoElementChange(null);
+    if (!isScreenSharingRef.current && onScreenVideoElementChangeRef.current) {
+      onScreenVideoElementChangeRef.current(null);
     }
-  }, [onScreenVideoElementChange]);
+  }, []);
 
   // Helper to cleanly detach all tracks (local + remote) on full leave or unmount
   const detachAllTracks = useCallback(() => {
@@ -146,8 +179,136 @@ export default function LiveKitVideoChat({
     setHasLocalScreenAudio(false);
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
     if (localScreenVideoRef.current) localScreenVideoRef.current.srcObject = null;
-    if (onScreenVideoElementChange) onScreenVideoElementChange(null);
-  }, [detachRemoteTracks, onScreenVideoElementChange]);
+    if (onScreenVideoElementChangeRef.current) onScreenVideoElementChangeRef.current(null);
+  }, [detachRemoteTracks]);
+
+  // Centralized synchronization helper for participants and all remote tracks
+  const syncRoomParticipants = useCallback((room: Room | null) => {
+    if (!room || room.state !== 'connected') return;
+
+    const remotes = Array.from(room.remoteParticipants.values());
+    const hasRemote = remotes.length > 0;
+    setHasRemoteParticipant(hasRemote);
+    onRemoteParticipantChangeRef.current?.(hasRemote);
+
+    if (hasRemote) {
+      const peer = remotes[0];
+      setRemoteParticipantName(peer.name || otherProfile.name);
+
+      let peerCamTrack: Track | null = null;
+      let peerMicTrack: Track | null = null;
+      let peerScreenTrack: Track | null = null;
+      let peerScreenAudioTrack: Track | null = null;
+
+      for (const pub of Array.from(peer.trackPublications.values())) {
+        if (!pub.isSubscribed) {
+          try {
+            pub.setSubscribed(true);
+          } catch {}
+        }
+        if (pub.source === Track.Source.Camera && pub.track) {
+          peerCamTrack = pub.track;
+        } else if (pub.source === Track.Source.Microphone && pub.track) {
+          peerMicTrack = pub.track;
+        } else if (pub.source === Track.Source.ScreenShare && pub.track) {
+          peerScreenTrack = pub.track;
+        } else if (pub.source === Track.Source.ScreenShareAudio && pub.track) {
+          peerScreenAudioTrack = pub.track;
+        }
+      }
+
+      const remoteCalling = Boolean(peerCamTrack || peerMicTrack || peerScreenTrack);
+      setIsRemoteInCall(remoteCalling);
+
+      if (peerCamTrack) {
+        setRemoteCamTrack(peerCamTrack);
+        setIsRemoteCamActive(true);
+        if (remoteVideoRef.current) {
+          peerCamTrack.attach(remoteVideoRef.current);
+          remoteVideoRef.current.play().catch(() => {});
+        }
+      } else {
+        setIsRemoteCamActive(false);
+      }
+
+      if (peerMicTrack) {
+        setRemoteMicTrack(peerMicTrack);
+        setIsRemoteMicActive(true);
+        if (remoteAudioRef.current) {
+          peerMicTrack.attach(remoteAudioRef.current);
+          remoteAudioRef.current.play().catch(() => {});
+        }
+      } else {
+        setIsRemoteMicActive(false);
+      }
+
+      if (peerScreenTrack) {
+        setRemoteScreenSharerName(peer.name || otherProfile.name);
+        setIsRemoteScreenActive(true);
+        setRemoteScreenTrack(peerScreenTrack);
+      }
+
+      if (peerScreenAudioTrack) {
+        setHasRemoteScreenAudio(true);
+        setRemoteScreenAudioTrack(peerScreenAudioTrack);
+      }
+
+      // If partner is in call with camera/mic and user hasn't explicitly left, auto-open call window
+      if (remoteCalling && !isOpenRef.current && !hasUserLeftCallRef.current) {
+        setIsOpen(true);
+        setIsMinimized(false);
+      }
+    } else {
+      setIsRemoteInCall(false);
+      setIsRemoteCamActive(false);
+      setIsRemoteMicActive(false);
+    }
+  }, [otherProfile.name]);
+
+  const syncRoomParticipantsRef = useRef(syncRoomParticipants);
+  useEffect(() => {
+    syncRoomParticipantsRef.current = syncRoomParticipants;
+  }, [syncRoomParticipants]);
+
+  // Periodic 2-second heartbeat sync: guarantees tracks and participant status stay 100% in sync
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (roomRef.current && roomRef.current.state === 'connected') {
+        syncRoomParticipantsRef.current(roomRef.current);
+      }
+    }, 2000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Browser Tab Switching & Focus Watcher: keeps video and audio playing ALWAYS
+  useEffect(() => {
+    const handleResumeMedia = () => {
+      if (document.visibilityState === 'visible' || !document.hidden) {
+        if (remoteVideoRef.current && remoteCamTrack) {
+          remoteVideoRef.current.play().catch(() => {});
+        }
+        if (localVideoRef.current && localCamTrack) {
+          localVideoRef.current.play().catch(() => {});
+        }
+        if (remoteAudioRef.current && remoteMicTrack) {
+          remoteAudioRef.current.play().catch(() => {});
+        }
+        if (remoteScreenVideoRef.current && remoteScreenTrack) {
+          remoteScreenVideoRef.current.play().catch(() => {});
+        }
+        if (localScreenVideoRef.current && localScreenTrack) {
+          localScreenVideoRef.current.play().catch(() => {});
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleResumeMedia);
+    window.addEventListener('focus', handleResumeMedia);
+    return () => {
+      document.removeEventListener('visibilitychange', handleResumeMedia);
+      window.removeEventListener('focus', handleResumeMedia);
+    };
+  }, [remoteCamTrack, localCamTrack, remoteMicTrack, remoteScreenTrack, localScreenTrack]);
 
   // Reactive effect: attach remote screen video whenever track or viewer element mounts
   useEffect(() => {
@@ -225,9 +386,11 @@ export default function LiveKitVideoChat({
     }
   }, [localCamTrack, isMinimized, isOpen]);
 
-  // Cleanup on unmount
+  // Cleanup on unmount ONLY
   useEffect(() => {
+    isMountedRef.current = true;
     return () => {
+      isMountedRef.current = false;
       if (roomRef.current) {
         roomRef.current.disconnect();
         roomRef.current = null;
@@ -244,18 +407,21 @@ export default function LiveKitVideoChat({
     enableCamMic?: boolean;
     openCallPanel?: boolean;
   } = {}): Promise<Room | null> => {
-    // If room is already active in background, quickly open panel or enable cam/mic
+    hasUserLeftCallRef.current = false;
+
+    // If room is already active in background, quickly open panel and enable cam/mic
     if (roomRef.current && roomRef.current.state === 'connected') {
+      const room = roomRef.current;
       if (openCallPanel) {
         setIsOpen(true);
         setIsMinimized(false);
       }
       if (enableCamMic) {
         try {
-          await roomRef.current.localParticipant.enableCameraAndMicrophone();
+          await room.localParticipant.enableCameraAndMicrophone();
           setIsCamEnabled(true);
           setIsMicEnabled(true);
-          const camPub = roomRef.current.localParticipant.getTrackPublication(Track.Source.Camera);
+          const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
           if (camPub?.track) {
             setLocalCamTrack(camPub.track);
           }
@@ -268,7 +434,8 @@ export default function LiveKitVideoChat({
           setIsMicEnabled(false);
         }
       }
-      return roomRef.current;
+      syncRoomParticipantsRef.current(room);
+      return room;
     }
 
     setCallStatus('connecting');
@@ -298,10 +465,11 @@ export default function LiveKitVideoChat({
         throw new Error('Incomplete video configuration received from server');
       }
 
-      // 2. Initialize LiveKit Room instance
+      // 2. Initialize LiveKit Room instance with persistent streaming (adaptiveStream & dynacast disabled for 1-on-1 permanence)
       const room = new Room({
-        adaptiveStream: true,
-        dynacast: true,
+        adaptiveStream: false,
+        dynacast: false,
+        stopLocalTrackOnUnpublish: true,
         videoCaptureDefaults: {
           resolution: VideoPresets.h360.resolution,
         },
@@ -311,45 +479,11 @@ export default function LiveKitVideoChat({
       // 3. Register Event Listeners
       room.on(RoomEvent.Connected, () => {
         setCallStatus('connected');
-        // Check if remote participants are already in the room
-        let hasRemote = false;
-        for (const p of Array.from(room.remoteParticipants.values())) {
-          hasRemote = true;
-          setRemoteParticipantName(p.name || otherProfile.name);
-
-          // Check if remote participant is already sharing a screen
-          for (const pub of Array.from(p.trackPublications.values())) {
-            if (pub.source === Track.Source.ScreenShare) {
-              setRemoteScreenSharerName(p.name || otherProfile.name);
-              setIsRemoteScreenActive(true);
-              setIsScreenViewerOpen(true);
-              if (pub.isSubscribed && pub.track) {
-                setRemoteScreenTrack(pub.track);
-              }
-            } else if (pub.source === Track.Source.ScreenShareAudio) {
-              setHasRemoteScreenAudio(true);
-              if (pub.isSubscribed && pub.track) {
-                setRemoteScreenAudioTrack(pub.track);
-              }
-            } else if (pub.source === Track.Source.Camera) {
-              if (pub.isSubscribed && pub.track) {
-                setRemoteCamTrack(pub.track);
-                setIsRemoteCamActive(true);
-              }
-            } else if (pub.source === Track.Source.Microphone) {
-              if (pub.isSubscribed && pub.track) {
-                setRemoteMicTrack(pub.track);
-                setIsRemoteMicActive(true);
-              }
-            }
-          }
-        }
-        setHasRemoteParticipant(hasRemote);
-        onRemoteParticipantChange?.(hasRemote);
+        syncRoomParticipantsRef.current(room);
 
         // Expose real-time position data sender
-        if (onSendPositionDataReady) {
-          onSendPositionDataReady((posData: any) => {
+        if (onSendPositionDataReadyRef.current) {
+          onSendPositionDataReadyRef.current((posData: any) => {
             if (roomRef.current && roomRef.current.state === 'connected') {
               try {
                 const bytes = new TextEncoder().encode(
@@ -367,8 +501,8 @@ export default function LiveKitVideoChat({
         try {
           const text = new TextDecoder().decode(payload);
           const parsed = JSON.parse(text);
-          if (parsed?.type === 'player_move' && onPositionDataReceived) {
-            onPositionDataReceived(parsed);
+          if (parsed?.type === 'player_move' && onPositionDataReceivedRef.current) {
+            onPositionDataReceivedRef.current(parsed);
           }
         } catch {}
       });
@@ -379,42 +513,53 @@ export default function LiveKitVideoChat({
 
       room.on(RoomEvent.Reconnected, () => {
         setCallStatus('connected');
+        syncRoomParticipantsRef.current(room);
       });
 
       room.on(RoomEvent.Disconnected, () => {
         setCallStatus('idle');
         setHasRemoteParticipant(false);
-        onRemoteParticipantChange?.(false);
-        onSendPositionDataReady?.(null);
+        setIsRemoteInCall(false);
+        onRemoteParticipantChangeRef.current?.(false);
+        onSendPositionDataReadyRef.current?.(null);
         setIsScreenSharing(false);
         setIsRemoteScreenActive(false);
         setIsScreenViewerOpen(false);
         detachAllTracks();
+
+        // Auto-reconnect background room if still mounted
+        if (isMountedRef.current && !hasUserLeftCallRef.current) {
+          setTimeout(() => {
+            if (isMountedRef.current && !roomRef.current) {
+              handleJoinCall({ enableCamMic: false, openCallPanel: false }).catch(() => {});
+            }
+          }, 1500);
+        }
       });
 
       room.on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
         setHasRemoteParticipant(true);
-        onRemoteParticipantChange?.(true);
+        onRemoteParticipantChangeRef.current?.(true);
         setRemoteParticipantName(participant.name || otherProfile.name);
+        syncRoomParticipantsRef.current(room);
       });
 
       room.on(RoomEvent.ParticipantDisconnected, () => {
         const hasRemote = room.remoteParticipants.size > 0;
         setHasRemoteParticipant(hasRemote);
-        onRemoteParticipantChange?.(hasRemote);
-        // Detach ONLY remote tracks so local user's screen share and camera are NOT affected!
+        onRemoteParticipantChangeRef.current?.(hasRemote);
         detachRemoteTracks();
-        if (!isScreenSharingRef.current) {
-          setIsRemoteScreenActive(false);
-          setHasRemoteScreenAudio(false);
-          setIsRemoteScreenLoading(false);
-        }
+        syncRoomParticipantsRef.current(room);
       });
 
-      // REALTIME: Detect when a track is published immediately (instant window open)
+      // Detect when a track is published immediately (instant window open & track sync)
       room.on(
         RoomEvent.TrackPublished,
         (publication: RemoteTrackPublication, participant: RemoteParticipant) => {
+          setHasRemoteParticipant(true);
+          onRemoteParticipantChangeRef.current?.(true);
+          setRemoteParticipantName(participant.name || otherProfile.name);
+
           if (publication.source === Track.Source.ScreenShare) {
             setRemoteScreenSharerName(participant.name || otherProfile.name);
             setIsRemoteScreenActive(true);
@@ -424,10 +569,17 @@ export default function LiveKitVideoChat({
           } else if (publication.source === Track.Source.ScreenShareAudio) {
             setHasRemoteScreenAudio(true);
           }
+
+          if (!publication.isSubscribed) {
+            try {
+              publication.setSubscribed(true);
+            } catch {}
+          }
+          syncRoomParticipantsRef.current(room);
         }
       );
 
-      // REALTIME: Detect when a track is unpublished immediately (instant window close)
+      // Detect when a track is unpublished immediately
       room.on(RoomEvent.TrackUnpublished, (publication: RemoteTrackPublication) => {
         if (publication.source === Track.Source.ScreenShare) {
           setIsRemoteScreenActive(false);
@@ -436,19 +588,30 @@ export default function LiveKitVideoChat({
           if (remoteScreenVideoRef.current) {
             remoteScreenVideoRef.current.srcObject = null;
           }
-          if (!isScreenSharingRef.current && onScreenVideoElementChange) {
-            onScreenVideoElementChange(null);
+          if (!isScreenSharingRef.current && onScreenVideoElementChangeRef.current) {
+            onScreenVideoElementChangeRef.current(null);
           }
         } else if (publication.source === Track.Source.ScreenShareAudio) {
           setHasRemoteScreenAudio(false);
           setRemoteScreenAudioTrack(null);
+        } else if (publication.source === Track.Source.Camera) {
+          setRemoteCamTrack(null);
+          setIsRemoteCamActive(false);
+        } else if (publication.source === Track.Source.Microphone) {
+          setRemoteMicTrack(null);
+          setIsRemoteMicActive(false);
         }
+        syncRoomParticipantsRef.current(room);
       });
 
       // Handle incoming remote media tracks (Differentiating ScreenShare from Webcam/Mic)
       room.on(
         RoomEvent.TrackSubscribed,
         (track: Track, publication: RemoteTrackPublication, participant: RemoteParticipant) => {
+          setHasRemoteParticipant(true);
+          onRemoteParticipantChangeRef.current?.(true);
+          setRemoteParticipantName(participant.name || otherProfile.name);
+
           if (publication.source === Track.Source.ScreenShare && track.kind === Track.Kind.Video) {
             setRemoteScreenSharerName(participant.name || otherProfile.name);
             setIsRemoteScreenActive(true);
@@ -467,13 +630,22 @@ export default function LiveKitVideoChat({
           ) {
             setRemoteCamTrack(track);
             setIsRemoteCamActive(true);
+            if (remoteVideoRef.current) {
+              track.attach(remoteVideoRef.current);
+              remoteVideoRef.current.play().catch(() => {});
+            }
           } else if (
             publication.source === Track.Source.Microphone &&
             track.kind === Track.Kind.Audio
           ) {
             setRemoteMicTrack(track);
             setIsRemoteMicActive(true);
+            if (remoteAudioRef.current) {
+              track.attach(remoteAudioRef.current);
+              remoteAudioRef.current.play().catch(() => {});
+            }
           }
+          syncRoomParticipantsRef.current(room);
         }
       );
 
@@ -490,8 +662,8 @@ export default function LiveKitVideoChat({
             if (remoteScreenVideoRef.current) {
               remoteScreenVideoRef.current.srcObject = null;
             }
-            if (!isScreenSharingRef.current && onScreenVideoElementChange) {
-              onScreenVideoElementChange(null);
+            if (!isScreenSharingRef.current && onScreenVideoElementChangeRef.current) {
+              onScreenVideoElementChangeRef.current(null);
             }
           } else if (publication.source === Track.Source.ScreenShareAudio) {
             setHasRemoteScreenAudio(false);
@@ -503,19 +675,17 @@ export default function LiveKitVideoChat({
             setRemoteMicTrack(null);
             setIsRemoteMicActive(false);
           }
+          syncRoomParticipantsRef.current(room);
         }
       );
 
-      room.on(RoomEvent.TrackMuted, (publication) => {
-        if (publication.source === Track.Source.Camera) {
-          setIsRemoteCamActive(false);
-        }
+      // Tab switches and network blips trigger TrackMuted - we NEVER hide the video element!
+      room.on(RoomEvent.TrackMuted, () => {
+        // Keep video element mounted and visible
       });
 
-      room.on(RoomEvent.TrackUnmuted, (publication) => {
-        if (publication.source === Track.Source.Camera) {
-          setIsRemoteCamActive(true);
-        }
+      room.on(RoomEvent.TrackUnmuted, () => {
+        syncRoomParticipantsRef.current(room);
       });
 
       // Handle local tracks publication & native browser stop-sharing detection
@@ -525,6 +695,7 @@ export default function LiveKitVideoChat({
           publication.track?.kind === Track.Kind.Video
         ) {
           setLocalCamTrack(publication.track);
+          setIsCamEnabled(true);
         } else if (
           publication.source === Track.Source.ScreenShare &&
           publication.track?.kind === Track.Kind.Video
@@ -539,8 +710,8 @@ export default function LiveKitVideoChat({
             setIsScreenSharing(false);
             setLocalScreenTrack(null);
             setHasLocalScreenAudio(false);
-            if (!isRemoteScreenActiveRef.current && onScreenVideoElementChange) {
-              onScreenVideoElementChange(null);
+            if (!isRemoteScreenActiveRef.current && onScreenVideoElementChangeRef.current) {
+              onScreenVideoElementChangeRef.current(null);
             }
           });
         } else if (publication.source === Track.Source.ScreenShareAudio) {
@@ -553,13 +724,14 @@ export default function LiveKitVideoChat({
           setIsScreenSharing(false);
           setLocalScreenTrack(null);
           setHasLocalScreenAudio(false);
-          if (!isRemoteScreenActiveRef.current && onScreenVideoElementChange) {
-            onScreenVideoElementChange(null);
+          if (!isRemoteScreenActiveRef.current && onScreenVideoElementChangeRef.current) {
+            onScreenVideoElementChangeRef.current(null);
           }
         } else if (publication.source === Track.Source.ScreenShareAudio) {
           setHasLocalScreenAudio(false);
         } else if (publication.source === Track.Source.Camera) {
           setLocalCamTrack(null);
+          setIsCamEnabled(false);
         }
       });
 
@@ -590,6 +762,7 @@ export default function LiveKitVideoChat({
         setIsMicEnabled(false);
       }
 
+      syncRoomParticipantsRef.current(room);
       return room;
     } catch (err: any) {
       console.error('Failed to join LiveKit call:', err);
@@ -612,6 +785,7 @@ export default function LiveKitVideoChat({
 
   // Leave Call handler: closes video call UI and disables media tracks without killing background data channel
   const handleLeaveCall = async () => {
+    hasUserLeftCallRef.current = true;
     if (roomRef.current) {
       if (isScreenSharing) {
         try {
@@ -690,7 +864,7 @@ export default function LiveKitVideoChat({
         setLocalScreenTrack(null);
         setHasLocalScreenAudio(false);
         if (!isRemoteScreenActiveRef.current) {
-          if (onScreenVideoElementChange) onScreenVideoElementChange(null);
+          if (onScreenVideoElementChangeRef.current) onScreenVideoElementChangeRef.current(null);
         }
       } catch (err: any) {
         console.error('Error stopping screen share:', err);
@@ -765,23 +939,31 @@ export default function LiveKitVideoChat({
   return (
     <>
       {/* Hidden Audio element for remote participant microphone */}
-      <audio ref={remoteAudioRef} autoPlay />
+      <audio ref={remoteAudioRef} autoPlay playsInline />
 
       {/* Hidden Audio element for remote participant screen share audio */}
-      <audio ref={remoteScreenAudioRef} autoPlay />
+      <audio ref={remoteScreenAudioRef} autoPlay playsInline />
 
       {/* Top HUD Call Launch / Status Button + Dedicated TV Button */}
       <div className="livekit-hud-anchor" style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
         {!isOpen ? (
           <button
             type="button"
-            className="livekit-join-pill-btn"
+            className={`livekit-join-pill-btn ${isRemoteInCall ? 'incoming-call' : ''}`}
             onClick={() => handleJoinCall({ enableCamMic: true, openCallPanel: true })}
-            title="Start or join private Living Room video call"
+            title={
+              isRemoteInCall
+                ? `${otherProfile.name} is in call! Click to join`
+                : 'Start or join private Living Room video call'
+            }
             aria-label="Join Video Call"
           >
-            <span className="livekit-pill-icon">📞</span>
-            <span className="livekit-pill-text">Join Call</span>
+            <span className={`livekit-pill-icon ${isRemoteInCall ? 'pulsing' : ''}`}>
+              {isRemoteInCall ? '🟢' : '📞'}
+            </span>
+            <span className="livekit-pill-text">
+              {isRemoteInCall ? `Join Call (${otherProfile.name} calling)` : 'Join Call'}
+            </span>
           </button>
         ) : (
           <button
@@ -799,7 +981,9 @@ export default function LiveKitVideoChat({
               {callStatus === 'connecting'
                 ? 'Connecting...'
                 : hasRemoteParticipant
-                ? `Call: ${otherProfile.name}`
+                ? isRemoteInCall || isCamEnabled
+                  ? `Call: ${otherProfile.name} (2/2)`
+                  : `Call: ${otherProfile.name}`
                 : 'Call: Solo in Room'}
             </span>
           </button>
@@ -941,6 +1125,11 @@ export default function LiveKitVideoChat({
                 autoPlay
                 playsInline
                 muted
+                onPause={(e) => {
+                  if (localScreenTrack) {
+                    e.currentTarget.play().catch(() => {});
+                  }
+                }}
                 className={`livekit-screen-video ${!isScreenSharing ? 'hidden' : ''}`}
               />
 
@@ -962,6 +1151,11 @@ export default function LiveKitVideoChat({
                 onPlaying={() => setIsRemoteScreenLoading(false)}
                 onCanPlay={() => setIsRemoteScreenLoading(false)}
                 onTimeUpdate={() => setIsRemoteScreenLoading(false)}
+                onPause={(e) => {
+                  if (remoteScreenTrack) {
+                    e.currentTarget.play().catch(() => {});
+                  }
+                }}
                 className={`livekit-screen-video ${!isRemoteScreenActive ? 'hidden' : ''}`}
               />
 
@@ -1035,7 +1229,7 @@ export default function LiveKitVideoChat({
               <span className="livekit-panel-title">LIVING ROOM CALL</span>
               {callStatus === 'connected' && (
                 <span className="livekit-participant-count">
-                  {hasRemoteParticipant ? '2/2' : '1/2'}
+                  {hasRemoteParticipant && (isRemoteInCall || isCamEnabled) ? '2/2' : '1/2'}
                 </span>
               )}
             </div>
@@ -1114,9 +1308,17 @@ export default function LiveKitVideoChat({
                     autoPlay
                     playsInline
                     muted
-                    className={`livekit-video-element mirrored ${!isCamEnabled ? 'hidden' : ''}`}
+                    onPause={(e) => {
+                      if (callStatus === 'connected' && localCamTrack && isCamEnabled) {
+                        e.currentTarget.play().catch(() => {});
+                      }
+                    }}
+                    onCanPlay={(e) => {
+                      e.currentTarget.play().catch(() => {});
+                    }}
+                    className={`livekit-video-element mirrored ${!isCamEnabled || !localCamTrack ? 'hidden' : ''}`}
                   />
-                  {!isCamEnabled && (
+                  {(!isCamEnabled || !localCamTrack) && (
                     <div className="livekit-camera-off-placeholder">
                       <div className="avatar-circle">
                         {localProfile.name.slice(0, 1).toUpperCase()}
@@ -1146,9 +1348,17 @@ export default function LiveKitVideoChat({
                     }}
                     autoPlay
                     playsInline
-                    className={`livekit-video-element ${!isRemoteCamActive || !hasRemoteParticipant ? 'hidden' : ''}`}
+                    onPause={(e) => {
+                      if (callStatus === 'connected' && remoteCamTrack) {
+                        e.currentTarget.play().catch(() => {});
+                      }
+                    }}
+                    onCanPlay={(e) => {
+                      e.currentTarget.play().catch(() => {});
+                    }}
+                    className={`livekit-video-element ${!isRemoteCamActive || !remoteCamTrack ? 'hidden' : ''}`}
                   />
-                  {hasRemoteParticipant && !isRemoteCamActive && (
+                  {hasRemoteParticipant && (!isRemoteCamActive || !remoteCamTrack) && (
                     <div className="livekit-camera-off-placeholder">
                       <div className="avatar-circle remote">
                         {otherProfile.name.slice(0, 1).toUpperCase()}
@@ -1167,11 +1377,14 @@ export default function LiveKitVideoChat({
                   )}
                   <div className="livekit-tile-badge">
                     <span className="badge-name">
-                      {hasRemoteParticipant ? remoteParticipantName : `${otherProfile.name} (Offline)`}
+                      {hasRemoteParticipant
+                        ? `${remoteParticipantName}${isRemoteInCall ? '' : ' (In Room)'}`
+                        : `${otherProfile.name} (Offline)`}
                     </span>
                     {hasRemoteParticipant && (
                       <span className="badge-icons">
                         {!isRemoteMicActive && <span title="Remote Mic Inactive">🔇</span>}
+                        {isRemoteCamActive && <span title="Camera Active">📹</span>}
                         {isRemoteScreenActive && <span title="Sharing Screen">🖥️</span>}
                       </span>
                     )}
@@ -1208,7 +1421,7 @@ export default function LiveKitVideoChat({
                 <span className="btn-label">{isCamEnabled ? 'Cam On' : 'Cam Off'}</span>
               </button>
 
-              {/* Screen Share Toggle Button (Phase 2 & 3) */}
+              {/* Screen Share Toggle Button */}
               <button
                 type="button"
                 className={`livekit-control-btn screen-share ${isScreenSharing ? 'active-share' : ''}`}
