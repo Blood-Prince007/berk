@@ -53,7 +53,11 @@ export default function WorldPage() {
 
   // Online Presence state
   const [currentUserId, setCurrentUserId] = useState<string>(SOPREMISH_USER_ID);
-  const [isRemoteOnline, setIsRemoteOnline] = useState<boolean>(false);
+  const [isAppwriteRemoteOnline, setIsAppwriteRemoteOnline] = useState<boolean>(false);
+  const [isLiveKitRemoteConnected, setIsLiveKitRemoteConnected] = useState<boolean>(false);
+
+  // User is online if active in Appwrite heartbeat/movement OR connected in LiveKit call
+  const isRemoteOnline = isAppwriteRemoteOnline || isLiveKitRemoteConnected;
 
   // Local Player
   const localPlayerRef = useRef<PlayerState>({
@@ -148,25 +152,52 @@ export default function WorldPage() {
 
     async function initUserAndMultiplayer() {
       try {
-        let authUser;
+        let resolvedUserId: string | null = null;
+
+        // 1. Check verified 1st-party server session cookie first
         try {
-          authUser = await account.get();
-        } catch {
-          // If no active Appwrite session in browser, check if server has session or redirect
-          console.log('No active Appwrite session detected.');
+          const sessionRes = await fetch('/api/auth/session');
+          if (sessionRes.ok) {
+            const sessionData = await sessionRes.json().catch(() => ({}));
+            if (
+              sessionData?.authenticated &&
+              sessionData?.userId &&
+              isAuthorizedUser(sessionData.userId)
+            ) {
+              resolvedUserId = sessionData.userId;
+            }
+          }
+        } catch (sessionErr) {
+          console.warn('Session check failed:', sessionErr);
         }
 
-        const myId = authUser?.$id || SOPREMISH_USER_ID;
+        // 2. Fall back to Appwrite client session if available
+        if (!resolvedUserId) {
+          try {
+            const authUser = await account.get();
+            if (authUser?.$id && isAuthorizedUser(authUser.$id)) {
+              resolvedUserId = authUser.$id;
+              // Synchronize session cookie
+              await fetch('/api/auth/session', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId: resolvedUserId }),
+              }).catch(() => {});
+            }
+          } catch {
+            // No client session
+          }
+        }
 
-        // Security check: Must be an authorized user
-        if (authUser && !isAuthorizedUser(authUser.$id)) {
-          await account.deleteSession('current');
+        // 3. If neither is valid, redirect to login
+        if (!resolvedUserId || !isAuthorizedUser(resolvedUserId)) {
           window.location.href = '/login';
           return;
         }
 
         if (!isSubscribed) return;
 
+        const myId = resolvedUserId;
         setCurrentUserId(myId);
         const otherId = getOtherAuthorizedUserId(myId);
 
@@ -204,12 +235,48 @@ export default function WorldPage() {
             };
             // If updated in last 30 seconds, mark online
             if (doc.updated_at && Date.now() - doc.updated_at < 30000) {
-              setIsRemoteOnline(true);
+              setIsAppwriteRemoteOnline(true);
               lastRemoteHeartbeatRef.current = doc.updated_at;
             }
           }
         } catch {
           // Use default spawn if not yet recorded
+        }
+
+        // Publish local player's initial position to ensure document exists
+        try {
+          await databases.updateDocument(
+            databaseId,
+            COLLECTIONS.PLAYER_STATES,
+            myId,
+            {
+              x: localPlayerRef.current.x,
+              y: localPlayerRef.current.y,
+              direction: localPlayerRef.current.facing,
+              anim_frame: 0,
+              is_moving: false,
+              seq: ++localSeqRef.current,
+              updated_at: Date.now(),
+            }
+          );
+        } catch (err: any) {
+          if (err?.code === 404 || err?.message?.toLowerCase().includes('not found')) {
+            await databases.createDocument(
+              databaseId,
+              COLLECTIONS.PLAYER_STATES,
+              myId,
+              {
+                user_id: myId,
+                x: localPlayerRef.current.x,
+                y: localPlayerRef.current.y,
+                direction: localPlayerRef.current.facing,
+                anim_frame: 0,
+                is_moving: false,
+                seq: ++localSeqRef.current,
+                updated_at: Date.now(),
+              }
+            ).catch(() => {});
+          }
         }
 
         // Subscribe to Appwrite Realtime for the Player States collection
@@ -228,7 +295,7 @@ export default function WorldPage() {
           }
 
           lastRemoteHeartbeatRef.current = Date.now();
-          setIsRemoteOnline(true);
+          setIsAppwriteRemoteOnline(true);
 
           remoteTargetRef.current = {
             x: Number(payload.x),
@@ -246,17 +313,27 @@ export default function WorldPage() {
 
     initUserAndMultiplayer();
 
-    // Heartbeat checker interval (checks if remote player went offline)
+    // Heartbeat checker interval (checks if remote player went offline in Appwrite)
     const presenceInterval = setInterval(() => {
       if (lastRemoteHeartbeatRef.current > 0) {
         const diff = Date.now() - lastRemoteHeartbeatRef.current;
-        setIsRemoteOnline(diff < 20000); // 20s cutoff
+        setIsAppwriteRemoteOnline(diff < 20000); // 20s cutoff
+      } else {
+        setIsAppwriteRemoteOnline(false);
       }
+    }, 3000);
+
+    // Periodic stationary heartbeat: keeps local player's updated_at fresh even when standing still
+    const stationaryHeartbeat = setInterval(() => {
+      if (!isSubscribed) return;
+      const player = localPlayerRef.current;
+      publishPosition(player.x, player.y, player.facing, false, 0);
     }, 4000);
 
     return () => {
       isSubscribed = false;
       clearInterval(presenceInterval);
+      clearInterval(stationaryHeartbeat);
       if (unsubscribeRealtime) {
         unsubscribeRealtime();
       }
@@ -390,20 +467,36 @@ export default function WorldPage() {
   const publishPosition = useCallback(
     async (x: number, y: number, direction: Direction, isMoving: boolean, animFrame: number) => {
       try {
-        await databases.updateDocument(
-          databaseId,
-          COLLECTIONS.PLAYER_STATES,
-          currentUserId,
-          {
-            x: Number(x.toFixed(1)),
-            y: Number(y.toFixed(1)),
-            direction,
-            anim_frame: Math.floor(animFrame),
-            is_moving: isMoving,
-            seq: ++localSeqRef.current,
-            updated_at: Date.now(),
+        const payload = {
+          x: Number(x.toFixed(1)),
+          y: Number(y.toFixed(1)),
+          direction,
+          anim_frame: Math.floor(animFrame),
+          is_moving: isMoving,
+          seq: ++localSeqRef.current,
+          updated_at: Date.now(),
+        };
+
+        try {
+          await databases.updateDocument(
+            databaseId,
+            COLLECTIONS.PLAYER_STATES,
+            currentUserId,
+            payload
+          );
+        } catch (err: any) {
+          if (err?.code === 404 || err?.message?.toLowerCase().includes('not found')) {
+            await databases.createDocument(
+              databaseId,
+              COLLECTIONS.PLAYER_STATES,
+              currentUserId,
+              {
+                user_id: currentUserId,
+                ...payload,
+              }
+            ).catch(() => {});
           }
-        );
+        }
       } catch {
         // Safe ignore network drops during movement
       }
@@ -557,13 +650,14 @@ export default function WorldPage() {
         camera.x += (desiredCamX - camera.x) * 0.12;
         camera.y += (desiredCamY - camera.y) * 0.12;
 
-        // 4. RENDER LIVING ROOM WITH BOTH PLAYERS
+        // 4. RENDER LIVING ROOM WITH PLAYERS (Standalone: only render partner if online)
         if (atlasRef.current) {
+          const playersToRender = isRemoteOnline ? [player, remotePlayer] : [player];
           renderLivingRoom(
             ctx,
             livingRoomDefinition,
             atlasRef.current,
-            [player, remotePlayer],
+            playersToRender,
             player.id,
             nearbyInteractiveRef.current,
             now / 1000,
@@ -663,6 +757,9 @@ export default function WorldPage() {
             onScreenVideoElementChange={(el) => {
               activeScreenVideoRef.current = el;
             }}
+            onRemoteParticipantChange={(hasRemote) => {
+              setIsLiveKitRemoteConnected(hasRemote);
+            }}
           />
           <button
             type="button"
@@ -750,8 +847,30 @@ export default function WorldPage() {
             <h2 className="interaction-title">{activeDialog.title}</h2>
             <p className="interaction-desc">{activeDialog.description}</p>
 
-            <div className="interaction-action-row">
-              <span className="interaction-hint-text">Press [Esc] or [E] to return</span>
+            <div className="interaction-action-row" style={{ display: 'flex', gap: '8px', alignItems: 'center', justifyContent: 'space-between' }}>
+              {activeDialog.id === 'interact_tv' ? (
+                <button
+                  type="button"
+                  style={{
+                    padding: '6px 14px',
+                    borderRadius: '6px',
+                    border: '1px solid #00e5ff',
+                    background: 'rgba(0, 229, 255, 0.15)',
+                    color: '#00e5ff',
+                    fontWeight: 600,
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                  }}
+                  onClick={() => {
+                    setActiveDialog(null);
+                    document.getElementById('tv-header-button')?.click();
+                  }}
+                >
+                  📺 Turn On TV / Watch Broadcast
+                </button>
+              ) : (
+                <span className="interaction-hint-text">Press [Esc] or [E] to return</span>
+              )}
               <button
                 type="button"
                 className="interaction-dismiss-btn"

@@ -4,7 +4,8 @@ import React, { useState } from 'react';
 import { account, isAuthorizedUser, AUTHORIZED_USERS, SOPREMISH_USER_ID, GRAPE_USER_ID } from '@/lib/appwrite';
 
 export default function LoginPage() {
-  const [email, setEmail] = useState('');
+  const [selectedUserId, setSelectedUserId] = useState<string>(SOPREMISH_USER_ID);
+  const [email, setEmail] = useState(AUTHORIZED_USERS[SOPREMISH_USER_ID]?.email || '');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -16,23 +17,25 @@ export default function LoginPage() {
     setIsLoading(true);
     setError(null);
 
-    // If user enters email with '@', authenticate via Appwrite Cloud Account
+    // Determine target user accurately
+    let targetUserId = selectedUserId;
+    const lowerEmail = email.toLowerCase().trim();
+    if (lowerEmail.includes('grishma') || lowerEmail.includes('grape')) {
+      targetUserId = GRAPE_USER_ID;
+    } else if (lowerEmail.includes('prem') || lowerEmail.includes('sopremish')) {
+      targetUserId = SOPREMISH_USER_ID;
+    }
+
+    // 1. Try Appwrite Cloud Account Session if email is provided
     if (email.includes('@')) {
       try {
-        // Clean up any stale active session first
         try {
           await account.deleteSession('current');
-        } catch {
-          // Ignore if no active session
-        }
+        } catch {}
 
-        // 1. Establish Appwrite Email/Password Session
         await account.createEmailPasswordSession(email.trim(), password);
-
-        // 2. Fetch authenticated user details
         const user = await account.get();
 
-        // 3. Strict Authorization check: only Sopremish and Grape allowed
         if (!isAuthorizedUser(user.$id)) {
           await account.deleteSession('current');
           setError('Access denied: You are not an authorized member of this private world.');
@@ -40,7 +43,6 @@ export default function LoginPage() {
           return;
         }
 
-        // 4. Synchronize server-side session cookie for Next.js route middleware
         await fetch('/api/auth/session', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -48,32 +50,26 @@ export default function LoginPage() {
         });
 
         window.location.href = '/world';
+        return;
       } catch (err: any) {
-        console.error('Login error:', err);
-        const msg = err?.message || 'Invalid email or password';
-        if (err?.type === 'user_invalid_credentials' || msg.toLowerCase().includes('credential')) {
-          setError('Invalid email or password');
-        } else if (msg.toLowerCase().includes('rate')) {
-          setError('Too many attempts. Please wait a few moments.');
-        } else {
-          setError(msg);
-        }
-        setIsLoading(false);
+        console.warn('Appwrite cloud session attempt failed, attempting secure BERK key fallback:', err);
       }
-      return;
     }
 
-    // Legacy Fallback (using server-side BERK_PASSWORD)
+    // 2. Server-Side Secure Password Fallback (BERK_PASSWORD with targeted userId)
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: password || email }),
+        body: JSON.stringify({
+          password: password || email,
+          userId: targetUserId,
+        }),
       });
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        setError(data.error || 'Invalid credentials');
+        setError(data.error || 'Invalid email or password');
         setIsLoading(false);
         return;
       }
@@ -86,6 +82,7 @@ export default function LoginPage() {
   };
 
   const selectUser = (userId: string) => {
+    setSelectedUserId(userId);
     const u = AUTHORIZED_USERS[userId];
     if (u) {
       setEmail(u.email);

@@ -20,6 +20,7 @@ import {
 interface LiveKitVideoChatProps {
   currentUserId: string;
   onScreenVideoElementChange?: (el: HTMLVideoElement | null) => void;
+  onRemoteParticipantChange?: (hasRemote: boolean) => void;
 }
 
 type CallStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
@@ -27,6 +28,7 @@ type CallStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'
 export default function LiveKitVideoChat({
   currentUserId,
   onScreenVideoElementChange,
+  onRemoteParticipantChange,
 }: LiveKitVideoChatProps) {
   const [callStatus, setCallStatus] = useState<CallStatus>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -230,13 +232,21 @@ export default function LiveKitVideoChat({
     };
   }, [detachAllTracks]);
 
-  // Join Call handler
-  const handleJoinCall = async () => {
+  // Join Call handler (supports standalone TV screen-share or webcam/mic call)
+  const handleJoinCall = async ({
+    enableCamMic = true,
+    openCallPanel = true,
+  }: {
+    enableCamMic?: boolean;
+    openCallPanel?: boolean;
+  } = {}): Promise<Room | null> => {
     setCallStatus('connecting');
     setErrorMessage(null);
     setWarningMessage(null);
-    setIsOpen(true);
-    setIsMinimized(false);
+    if (openCallPanel) {
+      setIsOpen(true);
+      setIsMinimized(false);
+    }
 
     try {
       // 1. Fetch server-generated secure token
@@ -271,8 +281,9 @@ export default function LiveKitVideoChat({
       room.on(RoomEvent.Connected, () => {
         setCallStatus('connected');
         // Check if remote participants are already in the room
+        let hasRemote = false;
         for (const p of Array.from(room.remoteParticipants.values())) {
-          setHasRemoteParticipant(true);
+          hasRemote = true;
           setRemoteParticipantName(p.name || otherProfile.name);
 
           // Check if remote participant is already sharing a screen
@@ -302,6 +313,8 @@ export default function LiveKitVideoChat({
             }
           }
         }
+        setHasRemoteParticipant(hasRemote);
+        onRemoteParticipantChange?.(hasRemote);
       });
 
       room.on(RoomEvent.Reconnecting, () => {
@@ -315,6 +328,7 @@ export default function LiveKitVideoChat({
       room.on(RoomEvent.Disconnected, () => {
         setCallStatus('idle');
         setHasRemoteParticipant(false);
+        onRemoteParticipantChange?.(false);
         setIsScreenSharing(false);
         setIsRemoteScreenActive(false);
         setIsScreenViewerOpen(false);
@@ -323,13 +337,14 @@ export default function LiveKitVideoChat({
 
       room.on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
         setHasRemoteParticipant(true);
+        onRemoteParticipantChange?.(true);
         setRemoteParticipantName(participant.name || otherProfile.name);
       });
 
       room.on(RoomEvent.ParticipantDisconnected, () => {
-        if (room.remoteParticipants.size === 0) {
-          setHasRemoteParticipant(false);
-        }
+        const hasRemote = room.remoteParticipants.size > 0;
+        setHasRemoteParticipant(hasRemote);
+        onRemoteParticipantChange?.(hasRemote);
         // Detach ONLY remote tracks so local user's screen share and camera are NOT affected!
         detachRemoteTracks();
         if (!isScreenSharingRef.current) {
@@ -494,24 +509,31 @@ export default function LiveKitVideoChat({
       // 4. Connect to LiveKit Server
       await room.connect(url, token);
 
-      // 5. Explicitly request camera and microphone permissions upon joining
-      try {
-        await room.localParticipant.enableCameraAndMicrophone();
-        setIsCamEnabled(true);
-        setIsMicEnabled(true);
+      // 5. Optionally request camera and microphone permissions upon joining
+      if (enableCamMic) {
+        try {
+          await room.localParticipant.enableCameraAndMicrophone();
+          setIsCamEnabled(true);
+          setIsMicEnabled(true);
 
-        const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
-        if (camPub?.track) {
-          setLocalCamTrack(camPub.track);
+          const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+          if (camPub?.track) {
+            setLocalCamTrack(camPub.track);
+          }
+        } catch (permErr: any) {
+          console.warn('Media permission denied or camera/mic not available:', permErr);
+          setWarningMessage(
+            'Camera/Microphone access was denied. You are connected in spectator mode.'
+          );
+          setIsCamEnabled(false);
+          setIsMicEnabled(false);
         }
-      } catch (permErr: any) {
-        console.warn('Media permission denied or camera/mic not available:', permErr);
-        setWarningMessage(
-          'Camera/Microphone access was denied. You are connected in spectator mode.'
-        );
+      } else {
         setIsCamEnabled(false);
         setIsMicEnabled(false);
       }
+
+      return room;
     } catch (err: any) {
       console.error('Failed to join LiveKit call:', err);
       setCallStatus('error');
@@ -520,6 +542,7 @@ export default function LiveKitVideoChat({
         roomRef.current.disconnect();
         roomRef.current = null;
       }
+      return null;
     }
   };
 
@@ -539,6 +562,7 @@ export default function LiveKitVideoChat({
     detachAllTracks();
     setCallStatus('idle');
     setHasRemoteParticipant(false);
+    onRemoteParticipantChange?.(false);
     setIsRemoteCamActive(false);
     setIsRemoteMicActive(false);
     setIsScreenSharing(false);
@@ -584,15 +608,25 @@ export default function LiveKitVideoChat({
     }
   };
 
-  // Toggle Screen Sharing
+  // Toggle Screen Sharing (Standalone-ready: auto-connects to room if not yet connected)
   const handleToggleScreenShare = async () => {
-    if (!roomRef.current || callStatus !== 'connected' || isStartingScreenShare) return;
+    if (isStartingScreenShare) return;
+
+    let room = roomRef.current;
+    if (!room || callStatus !== 'connected') {
+      setIsStartingScreenShare(true);
+      room = await handleJoinCall({ enableCamMic: false, openCallPanel: false });
+      if (!room) {
+        setIsStartingScreenShare(false);
+        return;
+      }
+    }
 
     if (isScreenSharing) {
       // Stop screen sharing
       setIsStartingScreenShare(true);
       try {
-        await roomRef.current.localParticipant.setScreenShareEnabled(false);
+        await room.localParticipant.setScreenShareEnabled(false);
         setIsScreenSharing(false);
         setLocalScreenTrack(null);
         setHasLocalScreenAudio(false);
@@ -610,17 +644,17 @@ export default function LiveKitVideoChat({
       setErrorMessage(null);
       try {
         // Request capture with audio if supported
-        await roomRef.current.localParticipant.setScreenShareEnabled(true, {
+        await room.localParticipant.setScreenShareEnabled(true, {
           audio: true,
           selfBrowserSurface: 'include',
           surfaceSwitching: 'include',
           systemAudio: 'include',
         });
 
-        const videoPub = roomRef.current.localParticipant.getTrackPublication(
+        const videoPub = room.localParticipant.getTrackPublication(
           Track.Source.ScreenShare
         );
-        const audioPub = roomRef.current.localParticipant.getTrackPublication(
+        const audioPub = room.localParticipant.getTrackPublication(
           Track.Source.ScreenShareAudio
         );
 
@@ -683,7 +717,7 @@ export default function LiveKitVideoChat({
           <button
             type="button"
             className="livekit-join-pill-btn"
-            onClick={handleJoinCall}
+            onClick={() => handleJoinCall({ enableCamMic: true, openCallPanel: true })}
             title="Start or join private Living Room video call"
             aria-label="Join Video Call"
           >
@@ -707,7 +741,7 @@ export default function LiveKitVideoChat({
                 ? 'Connecting...'
                 : hasRemoteParticipant
                 ? `Call: ${otherProfile.name}`
-                : 'Call: Living Room'}
+                : 'Call: Solo in Room'}
             </span>
           </button>
         )}
@@ -882,24 +916,25 @@ export default function LiveKitVideoChat({
               <p className="standby-desc">
                 No active broadcast in progress. Share your screen to watch videos, games, or work together!
               </p>
-              {callStatus === 'connected' ? (
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'center' }}>
                 <button
                   type="button"
                   className="standby-action-btn"
                   onClick={handleToggleScreenShare}
                   disabled={isStartingScreenShare}
                 >
-                  {isStartingScreenShare ? 'Starting Share...' : '🖥️ Share Your Screen'}
+                  {isStartingScreenShare ? 'Connecting Broadcast...' : '🖥️ Share Screen to TV'}
                 </button>
-              ) : (
-                <button
-                  type="button"
-                  className="standby-action-btn join"
-                  onClick={handleJoinCall}
-                >
-                  📞 Join Video Call
-                </button>
-              )}
+                {callStatus !== 'connected' && (
+                  <button
+                    type="button"
+                    className="standby-action-btn join"
+                    onClick={() => handleJoinCall({ enableCamMic: true, openCallPanel: true })}
+                  >
+                    📞 Join Video Call
+                  </button>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -1065,13 +1100,15 @@ export default function LiveKitVideoChat({
                   {!hasRemoteParticipant && (
                     <div className="livekit-waiting-placeholder">
                       <div className="waiting-pulse" />
-                      <span className="waiting-text">Waiting for {otherProfile.name}...</span>
-                      <span className="waiting-subtext">They will appear here when they join</span>
+                      <span className="waiting-text">Solo in Living Room</span>
+                      <span className="waiting-subtext">
+                        Your mic &amp; camera are live. {otherProfile.name} will appear here when they join.
+                      </span>
                     </div>
                   )}
                   <div className="livekit-tile-badge">
                     <span className="badge-name">
-                      {hasRemoteParticipant ? remoteParticipantName : otherProfile.name}
+                      {hasRemoteParticipant ? remoteParticipantName : `${otherProfile.name} (Offline)`}
                     </span>
                     {hasRemoteParticipant && (
                       <span className="badge-icons">
