@@ -112,6 +112,7 @@ export default function WorldPage() {
   const animFrameIdRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number | null>(null);
   const activeDialogRef = useRef<InteractiveObject | null>(null);
+  const activeScreenVideoRef = useRef<HTMLVideoElement | null>(null);
 
   // Synchronize activeDialogRef
   useEffect(() => {
@@ -567,7 +568,8 @@ export default function WorldPage() {
             nearbyInteractiveRef.current,
             now / 1000,
             camera,
-            viewportRef.current
+            viewportRef.current,
+            activeScreenVideoRef.current
           );
         }
       }
@@ -656,7 +658,12 @@ export default function WorldPage() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', pointerEvents: 'auto' }}>
-          <LiveKitVideoChat currentUserId={currentUserId} />
+          <LiveKitVideoChat
+            currentUserId={currentUserId}
+            onScreenVideoElementChange={(el) => {
+              activeScreenVideoRef.current = el;
+            }}
+          />
           <button
             type="button"
             id="logout-button"

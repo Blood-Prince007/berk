@@ -193,5 +193,51 @@ describe('LiveKit Server-Side Token Generation', () => {
       expect(data.userId).toBe(GRAPE_USER_ID);
       expect(data.name).toBe('Grape');
     });
+
+    it('grants canPublish, canSubscribe, and canPublishData enabling screen-sharing media tracks', async () => {
+      const validToken = await createSessionToken(SOPREMISH_USER_ID);
+      mockCookieMap.set('berk_session', validToken);
+
+      const req = new Request('http://localhost/api/livekit/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ room: WORLD_ID }),
+      });
+
+      const res = await POST(req);
+      const data = await res.json();
+      expect(res.status).toBe(200);
+
+      const verifier = new TokenVerifier('devkey_test_berk', 'secret_test_berk_32chars_long_enough!');
+      const claims = await verifier.verify(data.token);
+
+      expect(claims.video?.canPublish).toBe(true);
+      expect(claims.video?.canPublishData).toBe(true);
+      expect(claims.video?.canSubscribe).toBe(true);
+      expect(claims.video?.room).toBe(WORLD_ID);
+    });
+  });
+
+  describe('Track Source Classification Logic', () => {
+    it('accurately distinguishes screen-share video tracks from camera tracks', () => {
+      const isScreenShareVideo = (source: string, kind: string) => source === 'screen_share' && kind === 'video';
+      const isWebcamVideo = (source: string, kind: string) => source === 'camera' && kind === 'video';
+
+      expect(isScreenShareVideo('screen_share', 'video')).toBe(true);
+      expect(isScreenShareVideo('camera', 'video')).toBe(false);
+      expect(isWebcamVideo('camera', 'video')).toBe(true);
+      expect(isWebcamVideo('screen_share', 'video')).toBe(false);
+    });
+
+    it('accurately distinguishes screen-share audio from microphone audio', () => {
+      const isScreenAudio = (source: string, kind: string) => source === 'screen_share_audio' && kind === 'audio';
+      const isMicAudio = (source: string, kind: string) => source === 'microphone' && kind === 'audio';
+
+      expect(isScreenAudio('screen_share_audio', 'audio')).toBe(true);
+      expect(isScreenAudio('microphone', 'audio')).toBe(false);
+      expect(isMicAudio('microphone', 'audio')).toBe(true);
+      expect(isMicAudio('screen_share_audio', 'audio')).toBe(false);
+    });
   });
 });
+

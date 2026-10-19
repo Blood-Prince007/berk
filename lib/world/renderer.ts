@@ -16,7 +16,8 @@ export function renderLivingRoom(
   nearbyInteractive: InteractiveObject | null,
   timeSec: number,
   camera?: CameraState,
-  viewport?: { width: number; height: number }
+  viewport?: { width: number; height: number },
+  screenVideo?: HTMLVideoElement | null
 ) {
   const { pixelWidth, pixelHeight, tileSize, tileWidth, tileHeight } = room;
   const vpWidth = viewport ? viewport.width : pixelWidth;
@@ -126,6 +127,22 @@ export function renderLivingRoom(
       const sprite = (atlas as any)[f.spriteKey] as HTMLCanvasElement;
       if (sprite) {
         ctx.drawImage(sprite, f.x, f.y);
+
+        // In-world TV dynamic screen rendering (Phase 5)
+        if (f.spriteKey === 'tv_console' && screenVideo && screenVideo.readyState >= 2) {
+          try {
+            // Draw video frame onto TV screen
+            ctx.drawImage(screenVideo, f.x + 20, f.y + 6, 52, 22);
+
+            // Subtle retro CRT scanlines over TV screen
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+            for (let sy = f.y + 6; sy < f.y + 28; sy += 2) {
+              ctx.fillRect(f.x + 20, sy, 52, 1);
+            }
+          } catch {
+            // Graceful fallback if video frame not ready to draw
+          }
+        }
       }
     } else {
       const p = item.data as PlayerState;
