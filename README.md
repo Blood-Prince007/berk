@@ -54,10 +54,22 @@ A private virtual world belonging to **Sopremish** and **Grape**. Features a sec
    ```bash
    cp .env.example .env.local
    ```
-   Edit `.env.local` to specify your password:
+   Edit `.env.local` to specify your credentials:
    ```env
+   # Appwrite Cloud
+   NEXT_PUBLIC_APPWRITE_ENDPOINT=https://nyc.cloud.appwrite.io/v1
+   NEXT_PUBLIC_APPWRITE_PROJECT_ID=your_project_id
+   NEXT_PUBLIC_APPWRITE_DATABASE_ID=your_database_id
+   APPWRITE_API_KEY=your_server_api_key
+
+   # LiveKit Real-Time Audio/Video
+   LIVEKIT_API_KEY=your_livekit_api_key
+   LIVEKIT_API_SECRET=your_livekit_api_secret
+   NEXT_PUBLIC_LIVEKIT_URL=wss://your-project.livekit.cloud
+
+   # Server Session
    BERK_PASSWORD=your_secure_password_here
-   BERK_SESSION_SECRET=optional_custom_secret_key_for_cookie_signing
+   BERK_SESSION_SECRET=custom_secret_key_for_cookie_signing
    ```
 
 3. **Start Development Server**:
@@ -76,7 +88,7 @@ A private virtual world belonging to **Sopremish** and **Grape**. Features a sec
 
 ## Running Tests
 
-Unit tests are powered by **Vitest** and verify password validation, session tokens, movement calculations, collision geometry, sliding resolution, and interaction trigger zones.
+Unit tests are powered by **Vitest** and verify password validation, session tokens, movement calculations, collision geometry, sliding resolution, Appwrite identity rules, and LiveKit token generation/API authorization.
 
 ```bash
 npm test
@@ -88,19 +100,23 @@ npm test
 
 ```
 berk/
-├── .env.example          # Template for environment variables
+├── .env.example          # Template for environment variables (Appwrite + LiveKit)
 ├── .gitignore            # Excludes .env, build output, and node_modules
 ├── app/
-│   ├── api/auth/
-│   │   ├── login/        # Server-side password validation & session issuance
-│   │   └── logout/       # Session revocation & cookie deletion
-│   ├── login/            # Password login screen
+│   ├── api/
+│   │   ├── auth/         # Login, logout & session sync endpoints
+│   │   └── livekit/token # Secure server-side LiveKit JWT token generation
+│   ├── login/            # Password & Appwrite Cloud authentication screen
 │   ├── world/            # Cozy 2D living room canvas, game loop, HUD & modal
-│   ├── globals.css       # Pixel-art canvas styles, modal styling, mobile D-pad
+│   ├── globals.css       # Pixel-art canvas styles, modal styling, LiveKit video panel
 │   ├── layout.tsx        # HTML head, viewport metadata
 │   └── page.tsx          # Root redirect handler
+├── components/
+│   └── LiveKitVideoChat.tsx # Pixel-styled floating one-to-one video/audio call panel
 ├── lib/
+│   ├── appwrite.ts       # Appwrite Cloud client & user authorization rules
 │   ├── auth.ts           # Web Crypto HMAC session signing & password validation
+│   ├── livekit.ts        # Server-side LiveKit token generator & credential helper
 │   ├── movement.ts       # Movement helpers and key checking
 │   └── world/
 │       ├── types.ts      # Player, Room, Collision, and Interaction types
@@ -110,9 +126,11 @@ berk/
 │       └── renderer.ts   # Canvas renderer: floor, walls, Y-sorted depth, lighting
 ├── middleware.ts         # Edge route protection guard for /world & /
 ├── tests/
-│   ├── auth.test.ts      # Unit tests for auth and session token validation
-│   ├── movement.test.ts  # Unit tests for basic movement and clamping
-│   └── collision.test.ts # Unit tests for 2D room collision & sliding movement
+│   ├── appwrite-auth.test.ts # Tests for Appwrite multi-user rules
+│   ├── auth.test.ts          # Unit tests for auth and session token validation
+│   ├── collision.test.ts     # Unit tests for 2D room collision & sliding movement
+│   ├── livekit.test.ts       # Unit tests for LiveKit token generation & API security
+│   └── movement.test.ts      # Unit tests for basic movement and clamping
 ├── package.json
 └── tsconfig.json
 ```

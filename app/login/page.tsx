@@ -50,8 +50,14 @@ export default function LoginPage() {
         window.location.href = '/world';
       } catch (err: any) {
         console.error('Login error:', err);
-        const msg = err.message || 'Invalid email or password';
-        setError(msg.includes('rate') ? 'Too many attempts. Please wait.' : 'Invalid email or password');
+        const msg = err?.message || 'Invalid email or password';
+        if (err?.type === 'user_invalid_credentials' || msg.toLowerCase().includes('credential')) {
+          setError('Invalid email or password');
+        } else if (msg.toLowerCase().includes('rate')) {
+          setError('Too many attempts. Please wait a few moments.');
+        } else {
+          setError(msg);
+        }
         setIsLoading(false);
       }
       return;

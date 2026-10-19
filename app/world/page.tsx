@@ -1,7 +1,12 @@
 'use client';
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
+import dynamic from 'next/dynamic';
 import { livingRoomDefinition } from '@/lib/world/roomData';
+
+const LiveKitVideoChat = dynamic(() => import('@/components/LiveKitVideoChat'), {
+  ssr: false,
+});
 import { getSpriteAtlas, SpriteAtlas } from '@/lib/world/pixelSprites';
 import { renderLivingRoom } from '@/lib/world/renderer';
 import {
@@ -650,16 +655,19 @@ export default function WorldPage() {
           </span>
         </div>
 
-        <button
-          type="button"
-          id="logout-button"
-          className="logout-btn"
-          onClick={handleLogout}
-          disabled={isLoggingOut}
-          aria-label="Logout"
-        >
-          {isLoggingOut ? 'Logging out...' : 'Logout'}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', pointerEvents: 'auto' }}>
+          <LiveKitVideoChat currentUserId={currentUserId} />
+          <button
+            type="button"
+            id="logout-button"
+            className="logout-btn"
+            onClick={handleLogout}
+            disabled={isLoggingOut}
+            aria-label="Logout"
+          >
+            {isLoggingOut ? 'Logging out...' : 'Logout'}
+          </button>
+        </div>
       </header>
 
       {/* Full-Window Pixel Canvas */}
