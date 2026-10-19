@@ -26,6 +26,7 @@ import {
   AUTHORIZED_USERS,
   isAuthorizedUser,
   getOtherAuthorizedUserId,
+  WORLD_ID,
 } from '@/lib/appwrite';
 
 const PLAYER_SPEED_PIXELS_PER_SEC = 160;
@@ -53,11 +54,19 @@ export default function WorldPage() {
 
   // Online Presence state
   const [currentUserId, setCurrentUserId] = useState<string>(SOPREMISH_USER_ID);
+  const currentUserIdRef = useRef<string>(SOPREMISH_USER_ID);
   const [isAppwriteRemoteOnline, setIsAppwriteRemoteOnline] = useState<boolean>(false);
   const [isLiveKitRemoteConnected, setIsLiveKitRemoteConnected] = useState<boolean>(false);
 
   // User is online if active in Appwrite heartbeat/movement OR connected in LiveKit call
   const isRemoteOnline = isAppwriteRemoteOnline || isLiveKitRemoteConnected;
+  const isRemoteOnlineRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    isRemoteOnlineRef.current = isRemoteOnline;
+  }, [isRemoteOnline]);
+
+  const liveKitDataSenderRef = useRef<((posData: any) => void) | null>(null);
 
   // Local Player
   const localPlayerRef = useRef<PlayerState>({
@@ -145,6 +154,22 @@ export default function WorldPage() {
   const handleZoomOut = useCallback(() => applyZoom(targetZoomRef.current - 0.25), [applyZoom]);
   const handleZoomReset = useCallback(() => applyZoom(defaultCoverZoomRef.current), [applyZoom]);
 
+  // Handler for instant WebRTC LiveKit data packets
+  const handlePositionDataReceivedFromLiveKit = useCallback((data: any) => {
+    if (!data) return;
+    lastRemoteHeartbeatRef.current = Date.now();
+    setIsAppwriteRemoteOnline(true);
+    isRemoteOnlineRef.current = true;
+    remoteTargetRef.current = {
+      x: Number(data.x),
+      y: Number(data.y),
+      facing: (data.facing as Direction) || 'down',
+      animFrame: data.animFrame || 0,
+      isMoving: Boolean(data.isMoving),
+      seq: data.seq || 0,
+    };
+  }, []);
+
   // Authenticate user & initialize multiplayer identity
   useEffect(() => {
     let isSubscribed = true;
@@ -199,6 +224,7 @@ export default function WorldPage() {
 
         const myId = resolvedUserId;
         setCurrentUserId(myId);
+        currentUserIdRef.current = myId;
         const otherId = getOtherAuthorizedUserId(myId);
 
         const myProfile = AUTHORIZED_USERS[myId] || AUTHORIZED_USERS[SOPREMISH_USER_ID];
@@ -234,9 +260,10 @@ export default function WorldPage() {
               seq: doc.seq || 0,
             };
             // If updated in last 30 seconds, mark online
-            if (doc.updated_at && Date.now() - doc.updated_at < 30000) {
+            if (doc.updated_at && Date.now() - Number(doc.updated_at) < 30000) {
               setIsAppwriteRemoteOnline(true);
-              lastRemoteHeartbeatRef.current = doc.updated_at;
+              isRemoteOnlineRef.current = true;
+              lastRemoteHeartbeatRef.current = Number(doc.updated_at);
             }
           }
         } catch {
@@ -244,20 +271,23 @@ export default function WorldPage() {
         }
 
         // Publish local player's initial position to ensure document exists
+        const initialPayload = {
+          user_id: myId,
+          world_id: WORLD_ID,
+          x: localPlayerRef.current.x,
+          y: localPlayerRef.current.y,
+          direction: localPlayerRef.current.facing,
+          anim_frame: 0,
+          is_moving: false,
+          seq: ++localSeqRef.current,
+          updated_at: Date.now(),
+        };
         try {
           await databases.updateDocument(
             databaseId,
             COLLECTIONS.PLAYER_STATES,
             myId,
-            {
-              x: localPlayerRef.current.x,
-              y: localPlayerRef.current.y,
-              direction: localPlayerRef.current.facing,
-              anim_frame: 0,
-              is_moving: false,
-              seq: ++localSeqRef.current,
-              updated_at: Date.now(),
-            }
+            initialPayload
           );
         } catch (err: any) {
           if (err?.code === 404 || err?.message?.toLowerCase().includes('not found')) {
@@ -265,37 +295,34 @@ export default function WorldPage() {
               databaseId,
               COLLECTIONS.PLAYER_STATES,
               myId,
-              {
-                user_id: myId,
-                x: localPlayerRef.current.x,
-                y: localPlayerRef.current.y,
-                direction: localPlayerRef.current.facing,
-                anim_frame: 0,
-                is_moving: false,
-                seq: ++localSeqRef.current,
-                updated_at: Date.now(),
-              }
+              initialPayload
             ).catch(() => {});
           }
         }
 
-        // Subscribe to Appwrite Realtime for the Player States collection
-        const channel = `databases.${databaseId}.collections.${COLLECTIONS.PLAYER_STATES}.documents`;
-        unsubscribeRealtime = client.subscribe(channel, (response: any) => {
+        // Subscribe to Appwrite Realtime for both collection and document channels
+        const channels = [
+          `databases.${databaseId}.collections.${COLLECTIONS.PLAYER_STATES}.documents`,
+          `databases.${databaseId}.collections.${COLLECTIONS.PLAYER_STATES}.documents.${otherId}`,
+        ];
+        unsubscribeRealtime = client.subscribe(channels, (response: any) => {
           if (!isSubscribed) return;
           const payload = response.payload;
-          if (!payload || payload.user_id !== otherId) return;
+          if (!payload) return;
+          const packetId = payload.$id || payload.user_id;
+          if (packetId !== otherId) return;
 
-          // Reject out-of-order packets
-          if (payload.seq && payload.seq < lastRemoteSeqRef.current) {
+          const packetTime = Number(payload.updated_at) || Date.now();
+          const lastTime = lastRemoteHeartbeatRef.current || 0;
+
+          // Reject only if genuinely older by > 500ms
+          if (packetTime > 0 && lastTime > 0 && packetTime < lastTime - 500) {
             return;
           }
-          if (payload.seq) {
-            lastRemoteSeqRef.current = payload.seq;
-          }
 
-          lastRemoteHeartbeatRef.current = Date.now();
+          lastRemoteHeartbeatRef.current = packetTime;
           setIsAppwriteRemoteOnline(true);
+          isRemoteOnlineRef.current = true;
 
           remoteTargetRef.current = {
             x: Number(payload.x),
@@ -317,7 +344,11 @@ export default function WorldPage() {
     const presenceInterval = setInterval(() => {
       if (lastRemoteHeartbeatRef.current > 0) {
         const diff = Date.now() - lastRemoteHeartbeatRef.current;
-        setIsAppwriteRemoteOnline(diff < 20000); // 20s cutoff
+        const isOnline = diff < 20000;
+        setIsAppwriteRemoteOnline(isOnline);
+        if (!isOnline && !isLiveKitRemoteConnected) {
+          isRemoteOnlineRef.current = false;
+        }
       } else {
         setIsAppwriteRemoteOnline(false);
       }
@@ -328,12 +359,44 @@ export default function WorldPage() {
       if (!isSubscribed) return;
       const player = localPlayerRef.current;
       publishPosition(player.x, player.y, player.facing, false, 0);
-    }, 4000);
+    }, 3500);
+
+    // Reliable polling fallback: synchronizes position even if WebSocket is throttled
+    const pollInterval = setInterval(async () => {
+      if (!isSubscribed) return;
+      try {
+        const otherId = getOtherAuthorizedUserId(currentUserIdRef.current);
+        const doc = await databases.getDocument(
+          databaseId,
+          COLLECTIONS.PLAYER_STATES,
+          otherId
+        );
+        if (doc && doc.updated_at) {
+          const docTime = Number(doc.updated_at);
+          if (Date.now() - docTime < 25000) {
+            setIsAppwriteRemoteOnline(true);
+            isRemoteOnlineRef.current = true;
+            if (docTime > (lastRemoteHeartbeatRef.current || 0)) {
+              lastRemoteHeartbeatRef.current = docTime;
+              remoteTargetRef.current = {
+                x: Number(doc.x),
+                y: Number(doc.y),
+                facing: (doc.direction as Direction) || 'down',
+                animFrame: doc.anim_frame || 0,
+                isMoving: Boolean(doc.is_moving),
+                seq: doc.seq || 0,
+              };
+            }
+          }
+        }
+      } catch {}
+    }, 2000);
 
     return () => {
       isSubscribed = false;
       clearInterval(presenceInterval);
       clearInterval(stationaryHeartbeat);
+      clearInterval(pollInterval);
       if (unsubscribeRealtime) {
         unsubscribeRealtime();
       }
@@ -463,17 +526,35 @@ export default function WorldPage() {
     };
   }, [handleTriggerInteraction, handleZoomIn, handleZoomOut, handleZoomReset]);
 
-  // Rate-limited position update broadcaster
+  // Position update broadcaster: broadcasts over LiveKit DataChannel (instant WebRTC) + Appwrite (persistent)
   const publishPosition = useCallback(
     async (x: number, y: number, direction: Direction, isMoving: boolean, animFrame: number) => {
+      const myId = currentUserIdRef.current;
+      const seq = ++localSeqRef.current;
+
+      // 1. Instant ultra-fast WebRTC data broadcast to connected peer
+      if (liveKitDataSenderRef.current) {
+        liveKitDataSenderRef.current({
+          x: Number(x.toFixed(1)),
+          y: Number(y.toFixed(1)),
+          facing: direction,
+          animFrame: Math.floor(animFrame),
+          isMoving,
+          seq,
+        });
+      }
+
+      // 2. Persistent Appwrite database update
       try {
         const payload = {
+          user_id: myId,
+          world_id: WORLD_ID,
           x: Number(x.toFixed(1)),
           y: Number(y.toFixed(1)),
           direction,
           anim_frame: Math.floor(animFrame),
           is_moving: isMoving,
-          seq: ++localSeqRef.current,
+          seq,
           updated_at: Date.now(),
         };
 
@@ -481,7 +562,7 @@ export default function WorldPage() {
           await databases.updateDocument(
             databaseId,
             COLLECTIONS.PLAYER_STATES,
-            currentUserId,
+            myId,
             payload
           );
         } catch (err: any) {
@@ -489,11 +570,8 @@ export default function WorldPage() {
             await databases.createDocument(
               databaseId,
               COLLECTIONS.PLAYER_STATES,
-              currentUserId,
-              {
-                user_id: currentUserId,
-                ...payload,
-              }
+              myId,
+              payload
             ).catch(() => {});
           }
         }
@@ -501,7 +579,7 @@ export default function WorldPage() {
         // Safe ignore network drops during movement
       }
     },
-    [currentUserId]
+    []
   );
 
   // Main 60 FPS Game Loop
@@ -652,7 +730,7 @@ export default function WorldPage() {
 
         // 4. RENDER LIVING ROOM WITH PLAYERS (Standalone: only render partner if online)
         if (atlasRef.current) {
-          const playersToRender = isRemoteOnline ? [player, remotePlayer] : [player];
+          const playersToRender = isRemoteOnlineRef.current ? [player, remotePlayer] : [player];
           renderLivingRoom(
             ctx,
             livingRoomDefinition,
@@ -759,6 +837,13 @@ export default function WorldPage() {
             }}
             onRemoteParticipantChange={(hasRemote) => {
               setIsLiveKitRemoteConnected(hasRemote);
+              if (hasRemote) {
+                isRemoteOnlineRef.current = true;
+              }
+            }}
+            onPositionDataReceived={handlePositionDataReceivedFromLiveKit}
+            onSendPositionDataReady={(sender) => {
+              liveKitDataSenderRef.current = sender;
             }}
           />
           <button

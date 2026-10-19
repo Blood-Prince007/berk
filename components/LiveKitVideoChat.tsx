@@ -21,6 +21,8 @@ interface LiveKitVideoChatProps {
   currentUserId: string;
   onScreenVideoElementChange?: (el: HTMLVideoElement | null) => void;
   onRemoteParticipantChange?: (hasRemote: boolean) => void;
+  onPositionDataReceived?: (data: any) => void;
+  onSendPositionDataReady?: (sender: ((posData: any) => void) | null) => void;
 }
 
 type CallStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
@@ -29,6 +31,8 @@ export default function LiveKitVideoChat({
   currentUserId,
   onScreenVideoElementChange,
   onRemoteParticipantChange,
+  onPositionDataReceived,
+  onSendPositionDataReady,
 }: LiveKitVideoChatProps) {
   const [callStatus, setCallStatus] = useState<CallStatus>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -240,6 +244,33 @@ export default function LiveKitVideoChat({
     enableCamMic?: boolean;
     openCallPanel?: boolean;
   } = {}): Promise<Room | null> => {
+    // If room is already active in background, quickly open panel or enable cam/mic
+    if (roomRef.current && roomRef.current.state === 'connected') {
+      if (openCallPanel) {
+        setIsOpen(true);
+        setIsMinimized(false);
+      }
+      if (enableCamMic) {
+        try {
+          await roomRef.current.localParticipant.enableCameraAndMicrophone();
+          setIsCamEnabled(true);
+          setIsMicEnabled(true);
+          const camPub = roomRef.current.localParticipant.getTrackPublication(Track.Source.Camera);
+          if (camPub?.track) {
+            setLocalCamTrack(camPub.track);
+          }
+        } catch (permErr: any) {
+          console.warn('Media permission denied or camera/mic not available:', permErr);
+          setWarningMessage(
+            'Camera/Microphone access was denied. You are connected in spectator mode.'
+          );
+          setIsCamEnabled(false);
+          setIsMicEnabled(false);
+        }
+      }
+      return roomRef.current;
+    }
+
     setCallStatus('connecting');
     setErrorMessage(null);
     setWarningMessage(null);
@@ -315,6 +346,31 @@ export default function LiveKitVideoChat({
         }
         setHasRemoteParticipant(hasRemote);
         onRemoteParticipantChange?.(hasRemote);
+
+        // Expose real-time position data sender
+        if (onSendPositionDataReady) {
+          onSendPositionDataReady((posData: any) => {
+            if (roomRef.current && roomRef.current.state === 'connected') {
+              try {
+                const bytes = new TextEncoder().encode(
+                  JSON.stringify({ type: 'player_move', ...posData })
+                );
+                roomRef.current.localParticipant.publishData(bytes, { reliable: false });
+              } catch {}
+            }
+          });
+        }
+      });
+
+      // Receive real-time position packets from other player
+      room.on(RoomEvent.DataReceived, (payload: Uint8Array) => {
+        try {
+          const text = new TextDecoder().decode(payload);
+          const parsed = JSON.parse(text);
+          if (parsed?.type === 'player_move' && onPositionDataReceived) {
+            onPositionDataReceived(parsed);
+          }
+        } catch {}
       });
 
       room.on(RoomEvent.Reconnecting, () => {
@@ -329,6 +385,7 @@ export default function LiveKitVideoChat({
         setCallStatus('idle');
         setHasRemoteParticipant(false);
         onRemoteParticipantChange?.(false);
+        onSendPositionDataReady?.(null);
         setIsScreenSharing(false);
         setIsRemoteScreenActive(false);
         setIsScreenViewerOpen(false);
@@ -546,31 +603,33 @@ export default function LiveKitVideoChat({
     }
   };
 
-  // Leave Call handler
+  // Auto-connect room in background for instant peer presence & data sync
+  useEffect(() => {
+    if (currentUserId && callStatus === 'idle' && !roomRef.current) {
+      handleJoinCall({ enableCamMic: false, openCallPanel: false }).catch(() => {});
+    }
+  }, [currentUserId]);
+
+  // Leave Call handler: closes video call UI and disables media tracks without killing background data channel
   const handleLeaveCall = async () => {
     if (roomRef.current) {
       if (isScreenSharing) {
         try {
           await roomRef.current.localParticipant.setScreenShareEnabled(false);
-        } catch {
-          // Ignore
-        }
+        } catch {}
       }
-      roomRef.current.disconnect();
-      roomRef.current = null;
+      try {
+        await roomRef.current.localParticipant.setCameraEnabled(false);
+        await roomRef.current.localParticipant.setMicrophoneEnabled(false);
+      } catch {}
     }
-    detachAllTracks();
-    setCallStatus('idle');
-    setHasRemoteParticipant(false);
-    onRemoteParticipantChange?.(false);
-    setIsRemoteCamActive(false);
-    setIsRemoteMicActive(false);
+    setLocalCamTrack(null);
+    setIsCamEnabled(false);
+    setIsMicEnabled(false);
     setIsScreenSharing(false);
     setHasLocalScreenAudio(false);
-    setIsRemoteScreenActive(false);
-    setHasRemoteScreenAudio(false);
-    setIsScreenViewerOpen(false);
     setIsOpen(false);
+    setIsMinimized(false);
     setErrorMessage(null);
     setWarningMessage(null);
   };
@@ -713,7 +772,7 @@ export default function LiveKitVideoChat({
 
       {/* Top HUD Call Launch / Status Button + Dedicated TV Button */}
       <div className="livekit-hud-anchor" style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
-        {callStatus === 'idle' ? (
+        {!isOpen ? (
           <button
             type="button"
             className="livekit-join-pill-btn"

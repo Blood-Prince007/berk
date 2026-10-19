@@ -147,11 +147,14 @@ export function renderLivingRoom(
     } else {
       const p = item.data as PlayerState;
       const frames = p.avatarId === 'avatar_grape' ? atlas.player_grape : atlas.player;
-      const dirFrames = frames[p.facing];
+      const facing = p.facing && (frames as any)[p.facing] ? p.facing : 'down';
+      const dirFrames = (frames as any)[facing] || frames.down;
       if (dirFrames && dirFrames.length > 0) {
-        const frameIndex = p.isMoving ? Math.floor(p.animFrame) % dirFrames.length : 0;
-        const sprite = dirFrames[frameIndex];
-        ctx.drawImage(sprite, p.x, p.y);
+        const frameIndex = p.isMoving ? Math.floor(p.animFrame || 0) % dirFrames.length : 0;
+        const sprite = dirFrames[frameIndex] || dirFrames[0];
+        if (sprite) {
+          ctx.drawImage(sprite, p.x, p.y);
+        }
 
         // Player Name Pill
         ctx.save();
